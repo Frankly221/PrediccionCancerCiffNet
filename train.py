@@ -12,7 +12,7 @@ import warnings
 warnings.filterwarnings('ignore')
 
 from dataset import create_data_loaders
-from model import create_efficientnet_model, create_ensemble_model
+from model import create_ciff_net_phase1
 
 class FocalLoss(nn.Module):
     """Focal Loss para datasets desbalanceados - usado en papers médicos"""
@@ -49,7 +49,7 @@ class LabelSmoothing(nn.Module):
         loss = self.confidence * nll_loss + self.smoothing * smooth_loss
         return loss.mean()
 
-class EfficientNetTrainer:
+class CIFFNetPhase1Trainer:
     def __init__(self, model, train_loader, val_loader, label_encoder, device, config=None):
         self.model = model.to(device)
         self.train_loader = train_loader
@@ -65,7 +65,8 @@ class EfficientNetTrainer:
             'scheduler': 'cosine',  # 'cosine', 'plateau'
             'epochs': 50,
             'early_stopping_patience': 10,
-            'gradient_clipping': 1.0
+            'gradient_clipping': 1.0,
+            'warmup_epochs': 5
         }
         
         self._setup_training()
@@ -78,20 +79,25 @@ class EfficientNetTrainer:
         self.best_val_acc = 0.0
         
     def _setup_training(self):
-        """Configurar optimizer, loss y scheduler"""
+        """Configurar optimizer, loss y scheduler para CIFF-Net"""
         
-        # Optimizer con diferentes LR para backbone y classifier
+        # Diferentes learning rates para backbone y módulos MKSA
         backbone_params = []
+        mksa_params = []
         classifier_params = []
         
         for name, param in self.model.named_parameters():
-            if 'classifier' in name:
-                classifier_params.append(param)
-            else:
+            if 'backbone' in name:
                 backbone_params.append(param)
+            elif 'mksa' in name or 'attention' in name:
+                mksa_params.append(param)
+            else:
+                classifier_params.append(param)
         
+        # Optimizer con diferentes LR
         self.optimizer = optim.AdamW([
             {'params': backbone_params, 'lr': self.config['learning_rate'] * 0.1},
+            {'params': mksa_params, 'lr': self.config['learning_rate'] * 0.5},
             {'params': classifier_params, 'lr': self.config['learning_rate']}
         ], weight_decay=self.config['weight_decay'])
         
@@ -119,23 +125,35 @@ class EfficientNetTrainer:
                 verbose=True
             )
     
+    def warmup_lr(self, epoch):
+        """Warmup del learning rate para estabilidad inicial"""
+        if epoch < self.config['warmup_epochs']:
+            warmup_factor = (epoch + 1) / self.config['warmup_epochs']
+            for param_group in self.optimizer.param_groups:
+                param_group['lr'] = param_group['lr'] * warmup_factor
+    
     def train_epoch(self, epoch):
-        """Entrenar una época con progressive unfreezing"""
+        """Entrenar una época con progressive unfreezing para MKSA"""
         self.model.train()
         
-        # Progressive unfreezing (como en papers de transfer learning)
-        if hasattr(self.model, 'unfreeze_last_n_blocks') and epoch == 10:
-            print("🔓 Unfreezing last 2 blocks...")
-            self.model.unfreeze_last_n_blocks(2)
-        elif hasattr(self.model, 'freeze_backbone') and epoch == 20:
-            print("🔓 Unfreezing entire backbone...")
+        # Progressive unfreezing específico para CIFF-Net
+        if epoch == 5:
+            print("🔓 Unfreezing MKSA modules...")
+            for param in self.model.mksa_modules.parameters():
+                param.requires_grad = True
+        elif epoch == 15:
+            print("🔓 Unfreezing backbone...")
             self.model.freeze_backbone(False)
+        
+        # Warmup
+        if epoch < self.config['warmup_epochs']:
+            self.warmup_lr(epoch)
         
         running_loss = 0.0
         correct = 0
         total = 0
         
-        pbar = tqdm(self.train_loader, desc=f'Epoch {epoch+1}/{self.config["epochs"]}')
+        pbar = tqdm(self.train_loader, desc=f'CIFF Phase1 Epoch {epoch+1}/{self.config["epochs"]}')
         for batch_idx, (inputs, labels) in enumerate(pbar):
             inputs, labels = inputs.to(self.device), labels.to(self.device)
             
@@ -145,7 +163,7 @@ class EfficientNetTrainer:
             
             loss.backward()
             
-            # Gradient clipping
+            # Gradient clipping para estabilidad
             if self.config['gradient_clipping'] > 0:
                 torch.nn.utils.clip_grad_norm_(
                     self.model.parameters(), 
@@ -173,23 +191,19 @@ class EfficientNetTrainer:
         return epoch_loss, epoch_acc
     
     def validate(self):
-        """Validación con Test Time Augmentation (TTA)"""
+        """Validación del modelo CIFF-Net Fase 1"""
         self.model.eval()
         running_loss = 0.0
         all_preds = []
         all_labels = []
         
         with torch.no_grad():
-            for inputs, labels in tqdm(self.val_loader, desc='Validating'):
+            for inputs, labels in tqdm(self.val_loader, desc='Validating CIFF Phase1'):
                 inputs, labels = inputs.to(self.device), labels.to(self.device)
                 
-                # Forward pass normal
                 outputs = self.model(inputs)
                 loss = self.criterion(outputs, labels)
                 running_loss += loss.item()
-                
-                # TTA simple (opcional)
-                # outputs_tta = (outputs + self.model(torch.flip(inputs, [-1]))) / 2
                 
                 _, predicted = outputs.max(1)
                 all_preds.extend(predicted.cpu().numpy())
@@ -200,9 +214,33 @@ class EfficientNetTrainer:
         
         return val_loss, val_acc, all_preds, all_labels
     
+    def visualize_attention(self, sample_images, save_path='attention_visualization.png'):
+        """Visualizar mapas de atención del MKSA"""
+        self.model.eval()
+        
+        with torch.no_grad():
+            # Tomar una muestra pequeña
+            sample_batch = sample_images[:4].to(self.device)
+            attention_maps = self.model.get_attention_maps(sample_batch)
+            
+            fig, axes = plt.subplots(len(attention_maps), 4, figsize=(16, 4*len(attention_maps)))
+            
+            for level, att_maps in enumerate(attention_maps):
+                for i in range(4):
+                    # Promediar a través de canales para visualización
+                    att_map = att_maps[i].mean(dim=0).cpu().numpy()
+                    
+                    axes[level, i].imshow(att_map, cmap='hot', interpolation='bilinear')
+                    axes[level, i].set_title(f'Level {level+1}, Sample {i+1}')
+                    axes[level, i].axis('off')
+            
+            plt.tight_layout()
+            plt.savefig(save_path, dpi=300, bbox_inches='tight')
+            plt.show()
+    
     def train(self):
-        """Entrenamiento completo"""
-        print(f"🚀 Iniciando entrenamiento EfficientNet")
+        """Entrenamiento completo de CIFF-Net Fase 1"""
+        print("🚀 Iniciando entrenamiento CIFF-Net Fase 1 con MKSA")
         print(f"📊 Configuración: {self.config}")
         print(f"🏷️  Clases: {list(self.label_encoder.classes_)}")
         print(f"🔧 Device: {self.device}")
@@ -210,10 +248,13 @@ class EfficientNetTrainer:
         start_time = time.time()
         patience_counter = 0
         
+        # Obtener muestra para visualización de atención
+        sample_batch = next(iter(self.val_loader))[0]
+        
         for epoch in range(self.config['epochs']):
-            print(f"\n{'='*60}")
-            print(f"ÉPOCA {epoch+1}/{self.config['epochs']}")
-            print(f"{'='*60}")
+            print(f"\n{'='*70}")
+            print(f"ÉPOCA {epoch+1}/{self.config['epochs']} - CIFF-Net Fase 1")
+            print(f"{'='*70}")
             
             # Entrenar
             train_loss, train_acc = self.train_epoch(epoch)
@@ -241,9 +282,13 @@ class EfficientNetTrainer:
             # Guardar mejor modelo
             if val_acc > self.best_val_acc:
                 self.best_val_acc = val_acc
-                self.save_checkpoint(epoch, val_acc, 'best_efficientnet_model.pth')
-                print(f"🎉 ¡Nuevo mejor modelo! Acc: {val_acc:.2f}%")
+                self.save_checkpoint(epoch, val_acc, 'best_ciff_net_phase1.pth')
+                print(f"🎉 ¡Nuevo mejor modelo CIFF-Net Fase 1! Acc: {val_acc:.2f}%")
                 patience_counter = 0
+                
+                # Visualizar atención cada vez que mejore
+                if epoch % 5 == 0:
+                    self.visualize_attention(sample_batch, f'attention_epoch_{epoch+1}.png')
             else:
                 patience_counter += 1
             
@@ -258,9 +303,12 @@ class EfficientNetTrainer:
         # Mostrar resultados finales
         self.show_final_results(val_preds, val_labels)
         self.plot_training_history()
+        
+        # Visualización final de atención
+        self.visualize_attention(sample_batch, 'final_attention_maps.png')
     
     def save_checkpoint(self, epoch, val_acc, filename):
-        """Guardar checkpoint del modelo"""
+        """Guardar checkpoint del modelo CIFF-Net"""
         torch.save({
             'epoch': epoch,
             'model_state_dict': self.model.state_dict(),
@@ -272,15 +320,16 @@ class EfficientNetTrainer:
             'config': self.config,
             'train_losses': self.train_losses,
             'val_losses': self.val_losses,
-            'val_accuracies': self.val_accuracies
+            'val_accuracies': self.val_accuracies,
+            'model_type': 'CIFF-Net-Phase1'
         }, filename)
     
     def show_final_results(self, val_preds, val_labels):
-        """Mostrar resultados finales completos"""
+        """Mostrar resultados finales con métricas médicas"""
         class_names = self.label_encoder.classes_
         
         print(f"\n{'='*80}")
-        print("📊 RESULTADOS FINALES")
+        print("📊 RESULTADOS FINALES - CIFF-Net Fase 1")
         print(f"{'='*80}")
         
         # Reporte detallado
@@ -292,7 +341,7 @@ class EfficientNetTrainer:
         )
         print(report)
         
-        # Matriz de confusión
+        # Matriz de confusión mejorada
         cm = confusion_matrix(val_labels, val_preds)
         
         plt.figure(figsize=(12, 10))
@@ -301,29 +350,32 @@ class EfficientNetTrainer:
             xticklabels=class_names, yticklabels=class_names,
             cbar_kws={'label': 'Número de muestras'}
         )
-        plt.title('Matriz de Confusión - EfficientNet HAM10000', fontsize=16, fontweight='bold')
+        plt.title('Matriz de Confusión - CIFF-Net Fase 1 con MKSA', 
+                 fontsize=16, fontweight='bold')
         plt.ylabel('Etiqueta Verdadera', fontsize=12)
         plt.xlabel('Etiqueta Predicha', fontsize=12)
         plt.xticks(rotation=45)
         plt.yticks(rotation=0)
         plt.tight_layout()
-        plt.savefig('confusion_matrix_efficientnet.png', dpi=300, bbox_inches='tight')
+        plt.savefig('confusion_matrix_ciff_phase1.png', dpi=300, bbox_inches='tight')
         plt.show()
         
-        # Accuracy por clase
+        # Métricas por clase
         class_accuracies = cm.diagonal() / cm.sum(axis=1)
         print(f"\n🎯 Accuracy por clase:")
         for i, (class_name, acc) in enumerate(zip(class_names, class_accuracies)):
             print(f"  {class_name}: {acc:.4f} ({acc*100:.2f}%)")
+            
+        print(f"\n🏆 Mejor accuracy alcanzada: {self.best_val_acc:.2f}%")
     
     def plot_training_history(self):
-        """Graficar historial detallado"""
+        """Graficar historial de entrenamiento específico para CIFF-Net"""
         fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(15, 12))
         
         # Loss
         ax1.plot(self.train_losses, label='Train Loss', color='blue', alpha=0.8)
         ax1.plot(self.val_losses, label='Val Loss', color='red', alpha=0.8)
-        ax1.set_title('Pérdida durante el Entrenamiento', fontweight='bold')
+        ax1.set_title('Pérdida - CIFF-Net Fase 1', fontweight='bold')
         ax1.set_xlabel('Época')
         ax1.set_ylabel('Loss')
         ax1.legend()
@@ -333,7 +385,7 @@ class EfficientNetTrainer:
         ax2.plot(self.val_accuracies, label='Val Accuracy', color='green', linewidth=2)
         ax2.axhline(y=max(self.val_accuracies), color='red', linestyle='--', alpha=0.7, 
                    label=f'Best: {max(self.val_accuracies):.2f}%')
-        ax2.set_title('Precisión en Validación', fontweight='bold')
+        ax2.set_title('Precisión - CIFF-Net Fase 1', fontweight='bold')
         ax2.set_xlabel('Época')
         ax2.set_ylabel('Accuracy (%)')
         ax2.legend()
@@ -347,17 +399,17 @@ class EfficientNetTrainer:
         ax3.set_yscale('log')
         ax3.grid(True, alpha=0.3)
         
-        # Diferencia Train-Val Loss (Overfitting check)
-        loss_diff = np.array(self.val_losses) - np.array(self.train_losses)
-        ax4.plot(loss_diff, color='purple', linewidth=2)
-        ax4.axhline(y=0, color='black', linestyle='-', alpha=0.5)
-        ax4.set_title('Val Loss - Train Loss (Overfitting Check)', fontweight='bold')
+        # Convergencia
+        smoothed_acc = np.convolve(self.val_accuracies, np.ones(5)/5, mode='valid')
+        ax4.plot(range(len(smoothed_acc)), smoothed_acc, color='purple', linewidth=2)
+        ax4.set_title('Convergencia (Suavizada)', fontweight='bold')
         ax4.set_xlabel('Época')
-        ax4.set_ylabel('Loss Difference')
+        ax4.set_ylabel('Accuracy (%)')
         ax4.grid(True, alpha=0.3)
         
+        plt.suptitle('CIFF-Net Fase 1 - Historial de Entrenamiento', fontsize=16, fontweight='bold')
         plt.tight_layout()
-        plt.savefig('training_history_efficientnet.png', dpi=300, bbox_inches='tight')
+        plt.savefig('training_history_ciff_phase1.png', dpi=300, bbox_inches='tight')
         plt.show()
 
 def main():
@@ -365,48 +417,55 @@ def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"🔧 Usando dispositivo: {device}")
     
-    # Configuración de entrenamiento
+    # Configuración específica para CIFF-Net Fase 1
     training_config = {
         'learning_rate': 1e-4,
         'weight_decay': 1e-4,
-        'loss_type': 'focal',  # Mejor para datos médicos desbalanceados
+        'loss_type': 'focal',  # Ideal para datos médicos desbalanceados
         'scheduler': 'cosine',
         'epochs': 50,
-        'early_stopping_patience': 10,
-        'gradient_clipping': 1.0
+        'early_stopping_patience': 12,
+        'gradient_clipping': 1.0,
+        'warmup_epochs': 5
     }
     
-    # Cargar datos
+    # Cargar datos con rutas corregidas
     csv_file = "datasetHam10000/HAM10000_metadata.csv"
-    image_folders = ["datasetHam10000/part_1", "datasetHam10000/part_2"]
+    image_folders = ["datasetHam10000/HAM10000_images_part_1", "datasetHam10000/HAM10000_images_part_2"]  # Cambio aquí
     
-    print("📂 Cargando dataset HAM10000...")
+    print("📂 Cargando dataset HAM10000 para CIFF-Net...")
     train_loader, val_loader, label_encoder = create_data_loaders(
-        csv_file, image_folders, batch_size=32
+        csv_file, image_folders, batch_size=24  # Reduce si hay problemas de VRAM
     )
     
-    # Crear modelo
+    # Crear modelo CIFF-Net Fase 1
     num_classes = len(label_encoder.classes_)
-    print(f"🧠 Creando EfficientNet-B0 para {num_classes} clases...")
+    print(f"🧠 Creando CIFF-Net Fase 1 con MKSA para {num_classes} clases...")
     
-    # Puedes cambiar a 'b3' o 'b7' para más capacidad (pero más lento)
-    model = create_efficientnet_model(
+    model = create_ciff_net_phase1(
         num_classes=num_classes, 
-        variant='b0',  # 'b0', 'b3', 'b7'
+        backbone='efficientnet_b0',  # Cambiar a 'efficientnet_b3' si tienes más VRAM
         pretrained=True
     )
     
-    # Para usar ensemble (opcional, comentar línea anterior y descomentar estas):
-    # print("🤖 Creando Ensemble EfficientNet...")
-    # model = create_ensemble_model(num_classes=num_classes, variants=['b0', 'b3'])
+    # Resumen del modelo
+    from model import model_summary
+    model_summary(model)
     
     # Entrenar
-    trainer = EfficientNetTrainer(
+    trainer = CIFFNetPhase1Trainer(
         model, train_loader, val_loader, 
         label_encoder, device, training_config
     )
     
     trainer.train()
+    
+    print("\n🎉 ¡Entrenamiento de CIFF-Net Fase 1 completado!")
+    print("📁 Archivos generados:")
+    print("  - best_ciff_net_phase1.pth (modelo entrenado)")
+    print("  - confusion_matrix_ciff_phase1.png")
+    print("  - training_history_ciff_phase1.png")
+    print("  - attention_maps visualizaciones")
 
 if __name__ == "__main__":
     main()
