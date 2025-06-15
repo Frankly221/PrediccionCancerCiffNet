@@ -323,3 +323,15 @@ def create_improved_data_loaders(csv_file, image_folders, batch_size=24, test_si
 def create_aggressive_rtx3070_data_loaders(csv_file, image_folders, batch_size=32, test_size=0.2):
     """DataLoaders EXTREMOS específicos para RTX 3070"""
     return create_improved_data_loaders(csv_file, image_folders, batch_size, test_size)
+
+def get_maximum_train_transforms():
+    return transforms.Compose([
+        transforms.Resize((256, 256)),  # ⬆️ Mayor resolución
+        transforms.RandomRotation(20),
+        transforms.RandomHorizontalFlip(0.5),
+        transforms.RandomVerticalFlip(0.3),
+        transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
+        transforms.RandomAffine(degrees=15, translate=(0.1, 0.1), scale=(0.9, 1.1)),
+        transforms.ToTensor(),
+        transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+    ])
