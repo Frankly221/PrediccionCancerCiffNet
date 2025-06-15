@@ -735,5 +735,5 @@ if __name__ == "__main__":
         'save_dir': args.save_dir
     })
     
-    # Ejecutar pipeline completo
+    # Ejecutar pipeline completo todo okey?
     main()
