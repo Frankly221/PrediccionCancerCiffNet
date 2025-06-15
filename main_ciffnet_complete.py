@@ -41,10 +41,7 @@ class CiffNetComplete(nn.Module):
         # ================================
         # FASE 1: Feature Extraction
         # ================================
-        self.phase1 = create_phase1_extractor(
-            backbone_name=backbone,
-            pretrained=True
-        )
+        self.phase1 = create_phase1_extractor()  # ✅ CORREGIDO - Sin argumentos
         
         # ================================
         # FASE 2: Cliff Detection
@@ -563,13 +560,13 @@ def main():
         "datasetHam10000/HAM10000_images_part_2"
     ]
     
-    # LÍNEA CORREGIDA:
+    # ✅ LÍNEA CORREGIDA - Sin argumentos problemáticos
     train_loader, val_loader, label_encoder, class_weights = create_improved_data_loaders(
         csv_file=csv_file,
         image_folders=image_folders,
         batch_size=config['batch_size']
     )
-
+    
     print(f"✅ Dataset cargado:")
     print(f"   Train batches: {len(train_loader)}")
     print(f"   Val batches: {len(val_loader)}")
@@ -734,5 +731,5 @@ if __name__ == "__main__":
         'save_dir': args.save_dir
     })
     
-    # Ejecutar pipeline completo todo okey?
+    # Ejecutar pipeline completo
     main()
