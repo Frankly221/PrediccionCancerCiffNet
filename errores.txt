@@ -1,21 +1,62 @@
-   Cliff threshold: 0.15
+✅ CiffNetPhase3Loss inicializado:
+   Alpha (classification): 1.0
+   Beta (uncertainty): 0.3
+   Gamma (confidence): 0.2
+✅ CiffNet Complete creado:
+   Total parameters: 8,638,845
+   Trainable parameters: 8,638,845
+✅ Modelo creado y movido a cuda
+
+🏃 Iniciando entrenamiento...
+📊 CiffNet Metrics inicializado:
+   Classes: 7
+   Save dir: results
+   Class names: ['MEL', 'NV', 'BCC', 'AK', 'BKL', 'DF', 'VASC']
+✅ CiffNet Trainer inicializado:
+   Optimizer: AdamW
+   Scheduler: cosine
+   Mixed precision: True
+   Device: cuda
+🚀 Iniciando entrenamiento CiffNet Complete...
+   Epochs: 100
+   Batch size: 32
+   Learning rate: 0.0001
+Epoch 1/100:   0%|                                                                                                              | 0/350 [01:08<?, ?it/s] 
 Traceback (most recent call last):
-  File "C:\Users\alexi\Desktop\ModelosIA\PrediccionCancerCiffNet\main_ciffnet_complete.py", line 738, in <module>
+  File "C:\Users\alexi\Desktop\ModelosIA\PrediccionCancerCiffNet\main_ciffnet_complete.py", line 735, in <module>
     main()
     ~~~~^^
-  File "C:\Users\alexi\Desktop\ModelosIA\PrediccionCancerCiffNet\main_ciffnet_complete.py", line 583, in main  
-    model = CiffNetComplete(
-        num_classes=config['num_classes'],
-        cliff_threshold=config['cliff_threshold'],
-        backbone=config['backbone']
+  File "C:\Users\alexi\Desktop\ModelosIA\PrediccionCancerCiffNet\main_ciffnet_complete.py", line 608, in main
+    history = trainer.train()
+  File "C:\Users\alexi\Desktop\ModelosIA\PrediccionCancerCiffNet\main_ciffnet_complete.py", line 421, in train
+    train_loss, train_acc, train_f1 = self.train_epoch(epoch)
+                                      ~~~~~~~~~~~~~~~~^^^^^^^
+  File "C:\Users\alexi\Desktop\ModelosIA\PrediccionCancerCiffNet\main_ciffnet_complete.py", line 246, in train_epoch
+    outputs = self.model(images, targets, return_all=True)
+  File "C:\Users\alexi\AppData\Local\Programs\Python\Python313\Lib\site-packages\torch\nn\modules\module.py", line 1751, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "C:\Users\alexi\AppData\Local\Programs\Python\Python313\Lib\site-packages\torch\nn\modules\module.py", line 1762, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "C:\Users\alexi\Desktop\ModelosIA\PrediccionCancerCiffNet\main_ciffnet_complete.py", line 98, in forward
+    phase3_outputs = self.phase3(phase2_outputs, return_all=return_all)
+  File "C:\Users\alexi\AppData\Local\Programs\Python\Python313\Lib\site-packages\torch\nn\modules\module.py", line 1751, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "C:\Users\alexi\AppData\Local\Programs\Python\Python313\Lib\site-packages\torch\nn\modules\module.py", line 1762, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "C:\Users\alexi\Desktop\ModelosIA\PrediccionCancerCiffNet\phase3_classification_complete.py", line 279, in forward
+    classification_outputs = self.cliff_aware_classifier(
+        refined_features,
+        cliff_scores,
+        training=self.training
     )
-  File "C:\Users\alexi\Desktop\ModelosIA\PrediccionCancerCiffNet\main_ciffnet_complete.py", line 44, in __init__
-    self.phase1 = create_phase1_extractor(
-                  ~~~~~~~~~~~~~~~~~~~~~~~^
-        backbone_name=backbone,
-        ^^^^^^^^^^^^^^^^^^^^^^^
-        pretrained=True
-        ^^^^^^^^^^^^^^^
-    )
-    ^
-TypeError: create_phase1_extractor() got an unexpected keyword argument 'backbone_name'
+  File "C:\Users\alexi\AppData\Local\Programs\Python\Python313\Lib\site-packages\torch\nn\modules\module.py", line 1751, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "C:\Users\alexi\AppData\Local\Programs\Python\Python313\Lib\site-packages\torch\nn\modules\module.py", line 1762, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "C:\Users\alexi\Desktop\ModelosIA\PrediccionCancerCiffNet\phase3_classification_complete.py", line 77, in forward
+    final_logits[cliff_mask] = cliff_logits[cliff_mask]
+                               ~~~~~~~~~~~~^^^^^^^^^^^^
+IndexError: The shape of the mask [32, 1] at index 1 does not match the shape of the indexed tensor [32, 7] at index 1
