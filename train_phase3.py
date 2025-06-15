@@ -572,65 +572,60 @@ class CIFFNetPhase3Trainer:
         plt.show()
 
 def main():
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"🔧 Device: {device}")
+    # Verificar RTX 3070 Ti
+    if not torch.cuda.is_available():
+        print("❌ CUDA no disponible. Instala: pip install torch --index-url https://download.pytorch.org/whl/cu118")
+        return
     
-    # Configuración Fase 3
+    device = torch.device('cuda')
+    print(f"🔥 GPU: {torch.cuda.get_device_name(0)}")
+    print(f"💾 VRAM: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
+    
+    # Configuración optimizada para RTX 3070 Ti
     training_config = {
-        'learning_rate': 1e-5,
-        'weight_decay': 1e-5,
-        'epochs': 20,
-        'early_stopping_patience': 6,
-        'gradient_clipping': 0.3,
-        'confidence_loss_weight': 0.1,
-        'consistency_loss_weight': 0.05,
+        'learning_rate': 1e-4,
+        'weight_decay': 1e-4,
+        'loss_type': 'focal',
+        'scheduler': 'cosine',
+        'epochs': 50,
+        'early_stopping_patience': 12,
+        'gradient_clipping': 1.0,
+        'warmup_epochs': 5,
+        'mixed_precision': True,  # Usar AMP para RTX 3070 Ti
     }
     
-    # Cargar datos con rutas corregidas
-    csv_file = "datasetHam10000/HAM10000_metadata.csv"
-    image_folders = ["datasetHam10000/HAM10000_images_part_1", "datasetHam10000/HAM10000_images_part_2"]  # Cambio aquí
+    # Batch size optimizado para 8GB VRAM
+    batch_size = 28  # RTX 3070 Ti puede manejar esto bien
     
-    print("📂 Cargando dataset para Fase 3...")
-    train_loader, val_loader, label_encoder = create_data_loaders_phase2(
-        csv_file, image_folders,
-        batch_size=6,  # Batch pequeño para análisis detallado
-        num_context_images=3
+    # Cargar datos
+    csv_file = "datasetHam10000/HAM10000_metadata.csv"
+    image_folders = ["datasetHam10000/HAM10000_images_part_1", "datasetHam10000/HAM10000_images_part_2"]
+    
+    print(f"📂 Cargando dataset (batch_size={batch_size})...")
+    train_loader, val_loader, label_encoder = create_data_loaders(
+        csv_file, image_folders, batch_size=batch_size
     )
     
-    # Crear modelo Fase 3 completo
+    # Crear modelo RTX optimizado
     num_classes = len(label_encoder.classes_)
-    print(f"🧠 Creando CIFF-Net Fase 3 completo...")
+    print(f"🧠 Creando CIFF-Net RTX 3070 Ti para {num_classes} clases...")
     
-    try:
-        model = create_ciff_net_phase3(
-            phase1_model_path='best_ciff_net_phase1.pth',
-            phase2_model_path='best_ciff_net_phase2.pth',
-            num_classes=num_classes,
-            fusion_method='weighted_concatenation',
-            freeze_previous_phases=True  # Solo entrenar refinamiento
-        )
-        
-        # Entrenar
-        trainer = CIFFNetPhase3Trainer(
-            model, train_loader, val_loader,
-            label_encoder, device, training_config
-        )
-        
-        trainer.train()
-        
-        print("\n🎉 ¡CIFF-Net COMPLETO ENTRENADO EXITOSAMENTE!")
-        print("📁 Archivos generados:")
-        print("  - best_ciff_net_phase3.pth (modelo completo)")
-        print("  - ciff_net_complete_history.png")
-        print("  - confusion_matrix_complete.png")
-        print("  - phase_evolution visualizaciones")
-        
-    except FileNotFoundError as e:
-        print(f"❌ Error: {e}")
-        print("💡 Asegúrate de entrenar Fase 1 y Fase 2 primero:")
-        print("   1. python train.py (Fase 1)")
-        print("   2. python train_phase2.py (Fase 2)")
-        print("   3. python train_phase3.py (Fase 3)")
+    model = create_ciff_net_rtx3070ti(
+        num_classes=num_classes,
+        backbone='efficientnet_b2',  # Modelo más potente
+        pretrained=True
+    )
+    
+    # Resumen
+    rtx_model_summary(model)
+    
+    # Entrenar con AMP
+    trainer = CIFFNetPhase1TrainerRTX(
+        model, train_loader, val_loader,
+        label_encoder, device, training_config
+    )
+    
+    trainer.train()
 
 if __name__ == "__main__":
     main()
