@@ -1,16 +1,21 @@
-📁 Cargando dataset HAM10000...
+   Cliff threshold: 0.15
 Traceback (most recent call last):
-  File "C:\Users\alexi\Desktop\ModelosIA\PrediccionCancerCiffNet\main_ciffnet_complete.py", line 739, in <module>
+  File "C:\Users\alexi\Desktop\ModelosIA\PrediccionCancerCiffNet\main_ciffnet_complete.py", line 738, in <module>
     main()
     ~~~~^^
-  File "C:\Users\alexi\Desktop\ModelosIA\PrediccionCancerCiffNet\main_ciffnet_complete.py", line 566, in main  
-    train_loader, val_loader, label_encoder, class_weights = create_improved_data_loaders(
-                                                             ~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
-        csv_file=csv_file,
-        ^^^^^^^^^^^^^^^^^^
-    ...<3 lines>...
-        pin_memory=config['pin_memory']
-        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\alexi\Desktop\ModelosIA\PrediccionCancerCiffNet\main_ciffnet_complete.py", line 583, in main  
+    model = CiffNetComplete(
+        num_classes=config['num_classes'],
+        cliff_threshold=config['cliff_threshold'],
+        backbone=config['backbone']
+    )
+  File "C:\Users\alexi\Desktop\ModelosIA\PrediccionCancerCiffNet\main_ciffnet_complete.py", line 44, in __init__
+    self.phase1 = create_phase1_extractor(
+                  ~~~~~~~~~~~~~~~~~~~~~~~^
+        backbone_name=backbone,
+        ^^^^^^^^^^^^^^^^^^^^^^^
+        pretrained=True
+        ^^^^^^^^^^^^^^^
     )
     ^
-TypeError: create_improved_data_loaders() got an unexpected keyword argument 'num_workers'
+TypeError: create_phase1_extractor() got an unexpected keyword argument 'backbone_name'
