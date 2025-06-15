@@ -319,3 +319,7 @@ def create_improved_data_loaders(csv_file, image_folders, batch_size=24, test_si
     print(f"🚀 DataLoaders MAX GPU creados!")
     
     return train_loader, val_loader, train_data.label_encoder, train_data.get_class_weights_tensor()
+
+def create_aggressive_rtx3070_data_loaders(csv_file, image_folders, batch_size=32, test_size=0.2):
+    """DataLoaders EXTREMOS específicos para RTX 3070"""
+    return create_improved_data_loaders(csv_file, image_folders, batch_size, test_size)
