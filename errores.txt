@@ -1,30 +1,36 @@
-Exception in thread Thread-1 (_readerthread):
+ights. This may be expected if model is being adapted.
+🔥 Feature dimensions: [(16, torch.Size([112, 112])), (24, torch.Size([56, 56])), (40, torch.Size([28, 28])), (112, torch.Size([14, 14])), (320, torch.Size([7, 7]))]
+   Level 0: SE Block aplicado
+   Level 1: SE Block aplicado
+   Level 2: SE Block aplicado
+   Level 3: ImprovedMKSA aplicado
+   Level 4: ImprovedMKSA aplicado
 Traceback (most recent call last):
-  File "C:\Users\alexi\AppData\Local\Programs\Python\Python313\Lib\threading.py", line 1041, in _bootstrap_inner
-    self.run()
-    ~~~~~~~~^^
-  File "C:\Users\alexi\AppData\Local\Programs\Python\Python313\Lib\threading.py", line 992, in run   
-    self._target(*self._args, **self._kwargs)
-    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "C:\Users\alexi\AppData\Local\Programs\Python\Python313\Lib\subprocess.py", line 1611, in _readerthread
-    buffer.append(fh.read())
-                  ~~~~~~~^^
-  File "C:\Users\alexi\AppData\Local\Programs\Python\Python313\Lib\encodings\cp1252.py", line 23, in decode
-    return codecs.charmap_decode(input,self.errors,decoding_table)[0]
-           ~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-UnicodeDecodeError: 'charmap' codec can't decode byte 0x81 in position 216: character maps to <undefined>
-❌ Error en CIFF-Net RTX 8GB
-📤 Error:
-\Python313\Lib\site-packages\torch\nn\modules\module.py", line 1762, in _call_impl
-    return forward_call(*args, **kwargs)
-  File "C:\Users\alexi\AppData\Local\Programs\Python\Python313\Lib\site-packages\torch\nn\modules\container.py", line 240, in forward
-    input = module(input)
-  File "C:\Users\alexi\AppData\Local\Programs\Python\Python313\Lib\site-packages\torch\nn\modules\module.py", line 1751, in _wrapped_call_impl
-    return self._call_impl(*args, **kwargs)
-           ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
-  File "C:\Users\alexi\AppData\Local\Programs\Python\Python313\Lib\site-packages\torch\nn\modules\module.py", line 1762, in _call_impl
-    return forward_call(*args, **kwargs)
-  File "C:\Users\alexi\AppData\Local\Programs\Python\Python313\Lib\site-packages\torch\nn\modules\linear.py", line 125, in forward
-    return F.linear(input, self.weight, self.bias)
-           ~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-RuntimeError: mat1 and mat2 shapes cannot be multiplied (1x510 and 512x512)
+  File "C:\Users\alexi\Desktop\ModelosIA\PrediccionCancerCiffNet\train_improved.py", line 501, in <module>
+    main()
+    ~~~~^^
+  File "C:\Users\alexi\Desktop\ModelosIA\PrediccionCancerCiffNet\train_improved.py", line 486, in main
+    model = create_improved_ciff_net(
+        num_classes=num_classes,
+        backbone='efficientnet_b1',  # Modelo más potente
+        pretrained=True
+    )
+  File "C:\Users\alexi\Desktop\ModelosIA\PrediccionCancerCiffNet\model_improved.py", line 281, in create_improved_ciff_net
+    return ImprovedCIFFNet(num_classes, backbone, pretrained)
+  File "C:\Users\alexi\Desktop\ModelosIA\PrediccionCancerCiffNet\model_improved.py", line 229, in __init__
+    self.cs_attention = ImprovedCrossStageAttention(feature_dims, output_dim=1024)
+                        ~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\alexi\Desktop\ModelosIA\PrediccionCancerCiffNet\model_improved.py", line 151, in __init__
+    self.cross_attention = nn.MultiheadAttention(
+                           ~~~~~~~~~~~~~~~~~~~~~^
+        embed_dim=proj_dim_per_level,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<2 lines>...
+        batch_first=True
+        ^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "C:\Users\alexi\AppData\Local\Programs\Python\Python313\Lib\site-packages\torch\nn\modules\activation.py", line 1076, in __init__
+    self.head_dim * num_heads == self.embed_dim
+AssertionError: embed_dim must be divisible by num_heads
+❌ Error en entrenamiento mejorado
