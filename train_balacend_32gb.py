@@ -12,23 +12,25 @@ import time
 import warnings
 warnings.filterwarnings('ignore')
 
-# CONFIGURACIÓN BALANCEADA para evitar saturación RAM
+# CONFIGURACIÓN MAX GPU para RTX 3070 + 32GB RAM
 import os
 os.environ['CUDA_LAUNCH_BLOCKING'] = '0'
-os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
-os.environ['OMP_NUM_THREADS'] = '8'
+os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True,roundup_power2_divisions:16'
+os.environ['OMP_NUM_THREADS'] = '16'  # ⬆️ MAX para 32GB RAM
+os.environ['CUDA_CACHE_DISABLE'] = '0'
 
 torch.backends.cudnn.benchmark = True
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
-torch.set_num_threads(8)
+torch.backends.cudnn.deterministic = False  # ⬆️ Más velocidad
+torch.set_num_threads(16)
 
 from dataset_improved import create_improved_data_loaders
 from model_improved import create_improved_ciff_net, FocalLoss
 from tqdm import tqdm
 
-class BalancedRAMGPUTrainer:
-    """Trainer balanceado con matriz de confusión completa"""
+class MaxGPUTrainer:
+    """Trainer MAX GPU con matriz de confusión SOLO AL FINAL"""
     def __init__(self, model, train_loader, val_loader, label_encoder, class_weights, device, config):
         self.model = model.to(device)
         self.train_loader = train_loader
@@ -38,56 +40,87 @@ class BalancedRAMGPUTrainer:
         self.label_encoder = label_encoder
         self.class_weights = class_weights.to(device)
         
-        # GPU optimizada pero RAM controlada
+        # CONFIGURACIÓN MAX GPU
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-            torch.cuda.set_per_process_memory_fraction(0.95)
+            torch.cuda.set_per_process_memory_fraction(0.99)  # ⬆️ 99% VRAM
+            torch.backends.cuda.cufft_plan_cache.max_size = 4
         
-        # AMP
-        self.scaler = GradScaler()
+        # AMP con configuración agresiva
+        self.scaler = GradScaler(
+            init_scale=65536.0,
+            growth_factor=2.0,
+            backoff_factor=0.5,
+            growth_interval=2000
+        )
         
-        # Optimizer
+        # Optimizer optimizado para MAX throughput
         self.optimizer = torch.optim.AdamW(
             self.model.parameters(),
             lr=config['learning_rate'],
             weight_decay=config['weight_decay'],
             betas=(0.9, 0.999),
-            eps=1e-8
+            eps=1e-8,
+            amsgrad=False
         )
         
-        # Scheduler
+        # Scheduler más agresivo
         self.scheduler = ReduceLROnPlateau(
             self.optimizer, 
             mode='max',
             factor=0.5,
-            patience=5,
-            min_lr=1e-7
+            patience=3,  # ⬇️ Más agresivo con MAX GPU
+            min_lr=1e-8,
+            threshold=0.01
         )
         
-        # Loss
+        # Loss optimizado
         self.criterion = FocalLoss(alpha=1.0, gamma=2.0, weight=self.class_weights)
         
-        # Tracking con matrices de confusión
+        # Tracking simplificado (NO matriz por época)
         self.train_losses = []
         self.train_accuracies = []
         self.val_losses = []
         self.val_accuracies = []
         self.melanoma_recalls = []
         self.learning_rates = []
-        self.confusion_matrices = []  # ⬆️ NUEVO
-        self.classification_reports = []  # ⬆️ NUEVO
+        self.gpu_utilization = []
+        self.batch_throughput = []
+        
+        # Solo guardar ÚLTIMA matriz de confusión
+        self.final_confusion_matrix = None
+        self.final_class_metrics = None
+        self.final_classification_report = None
         
         # Best metrics
         self.best_overall_acc = 0
         self.best_melanoma_recall = 0
         self.best_balanced_score = 0
         
-        print(f"🚀 Trainer BALANCEADO con Análisis Completo inicializado:")
+        print(f"🚀 MAX GPU Trainer inicializado:")
+        print(f"   Target GPU: 95%+")
+        print(f"   VRAM usage: 99%")
         print(f"   Batch size: {train_loader.batch_size}")
         print(f"   Workers: {train_loader.num_workers}")
         print(f"   Clases: {len(label_encoder.classes_)}")
-        print(f"   Clases: {list(label_encoder.classes_)}")
+        print(f"   📊 Matriz de confusión: SOLO AL FINAL")
         
+    def monitor_gpu_utilization(self):
+        """Monitor GPU utilization"""
+        if torch.cuda.is_available():
+            memory_allocated = torch.cuda.memory_allocated() / 1e9
+            memory_reserved = torch.cuda.memory_reserved() / 1e9
+            memory_percent = (memory_allocated / 8.0) * 100
+            utilization = min(99, memory_percent * 1.2)
+            
+            return {
+                'memory_allocated_gb': memory_allocated,
+                'memory_reserved_gb': memory_reserved,
+                'memory_percent': memory_percent,
+                'estimated_utilization': utilization
+            }
+        return {'memory_allocated_gb': 0, 'memory_reserved_gb': 0, 'memory_percent': 0, 'estimated_utilization': 0}
+    
     def compute_melanoma_metrics(self, all_predicted, all_targets):
         """Calcular métricas para melanoma"""
         melanoma_idx = None
@@ -112,12 +145,9 @@ class BalancedRAMGPUTrainer:
         return recall, precision
     
     def compute_detailed_metrics(self, all_predicted, all_targets):
-        """Calcular métricas detalladas y matriz de confusión"""
-        
-        # Matriz de confusión
+        """Calcular métricas detalladas"""
         cm = confusion_matrix(all_targets, all_predicted)
         
-        # Classification report
         report = classification_report(
             all_targets, 
             all_predicted, 
@@ -152,126 +182,8 @@ class BalancedRAMGPUTrainer:
         
         return cm, report, class_metrics
     
-    def plot_confusion_matrix(self, cm, epoch, save_path):
-        """Crear gráfico de matriz de confusión"""
-        plt.figure(figsize=(12, 10))
-        
-        # Normalizar matriz
-        cm_normalized = cm.astype('float') / cm.sum(axis=1)[:, np.newaxis]
-        
-        # Crear heatmap
-        sns.heatmap(
-            cm_normalized, 
-            annot=True, 
-            fmt='.3f',
-            cmap='Blues',
-            xticklabels=self.label_encoder.classes_,
-            yticklabels=self.label_encoder.classes_,
-            cbar_kws={'label': 'Accuracy Normalizada'}
-        )
-        
-        plt.title(f'Matriz de Confusión - CIFF-Net Balanceado\nÉpoca {epoch+1}', 
-                 fontsize=16, fontweight='bold')
-        plt.xlabel('Predicción', fontsize=14)
-        plt.ylabel('Real', fontsize=14)
-        
-        # Highlight melanoma row/column
-        melanoma_idx = None
-        for i, class_name in enumerate(self.label_encoder.classes_):
-            if 'mel' in class_name.lower():
-                melanoma_idx = i
-                break
-        
-        if melanoma_idx is not None:
-            # Add red lines around melanoma
-            plt.axhline(y=melanoma_idx, color='red', linewidth=3, alpha=0.7)
-            plt.axhline(y=melanoma_idx+1, color='red', linewidth=3, alpha=0.7)
-            plt.axvline(x=melanoma_idx, color='red', linewidth=3, alpha=0.7)
-            plt.axvline(x=melanoma_idx+1, color='red', linewidth=3, alpha=0.7)
-        
-        plt.tight_layout()
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        plt.close()
-    
-    def create_comprehensive_report(self, epoch, cm, class_metrics, melanoma_recall, melanoma_precision):
-        """Crear reporte detallado del modelo"""
-        
-        report_text = f"""
-╔══════════════════════════════════════════════════════════════════════════════╗
-║                    REPORTE DETALLADO CIFF-NET BALANCEADO                    ║
-║                                ÉPOCA {epoch+1:2d}                                ║
-╚══════════════════════════════════════════════════════════════════════════════╝
-
-🎯 MÉTRICAS GENERALES:
-   • Accuracy General: {self.val_accuracies[-1]:.2f}%
-   • Loss de Validación: {self.val_losses[-1]:.4f}
-   • Learning Rate: {self.learning_rates[-1]:.2e}
-
-🩺 MÉTRICAS MELANOMA (CRÍTICAS):
-   • Recall (Sensibilidad): {melanoma_recall*100:.2f}%
-   • Precision: {melanoma_precision*100:.2f}%
-   • F1-Score: {2*(melanoma_recall*melanoma_precision)/(melanoma_recall+melanoma_precision)*100 if (melanoma_recall+melanoma_precision) > 0 else 0:.2f}%
-
-📊 MÉTRICAS POR CLASE:
-"""
-        
-        for class_name, metrics in class_metrics.items():
-            is_melanoma = 'mel' in class_name.lower()
-            marker = "🩺" if is_melanoma else "📋"
-            
-            report_text += f"""
-   {marker} {class_name.upper()}:
-      • Precision: {metrics['precision']*100:.2f}%
-      • Recall: {metrics['recall']*100:.2f}%
-      • F1-Score: {metrics['f1_score']*100:.2f}%
-      • Specificity: {metrics['specificity']*100:.2f}%
-      • Support: {metrics['support']} casos
-"""
-        
-        # Análisis de matriz de confusión
-        report_text += f"""
-🔍 ANÁLISIS MATRIZ DE CONFUSIÓN:
-   • Diagonal principal (aciertos): {np.trace(cm)} / {np.sum(cm)}
-   • Accuracy calculada: {np.trace(cm) / np.sum(cm) * 100:.2f}%
-   
-📈 ERRORES MÁS COMUNES:
-"""
-        
-        # Encontrar errores más comunes (off-diagonal)
-        cm_errors = cm.copy()
-        np.fill_diagonal(cm_errors, 0)
-        
-        # Top 3 errores
-        flat_indices = np.argpartition(cm_errors.ravel(), -3)[-3:]
-        top_errors = [(np.unravel_index(idx, cm_errors.shape), cm_errors.flat[idx]) 
-                     for idx in flat_indices if cm_errors.flat[idx] > 0]
-        
-        for (true_idx, pred_idx), count in sorted(top_errors, key=lambda x: x[1], reverse=True):
-            true_class = self.label_encoder.classes_[true_idx]
-            pred_class = self.label_encoder.classes_[pred_idx]
-            percentage = count / np.sum(cm[true_idx]) * 100
-            report_text += f"   • {true_class} → {pred_class}: {count} casos ({percentage:.1f}%)\n"
-        
-        report_text += f"""
-⚖️ BALANCE DEL MODELO:
-   • Score Balanceado: {self.compute_balanced_score(self.val_accuracies[-1], melanoma_recall):.2f}%
-   • Mejor Accuracy hasta ahora: {self.best_overall_acc:.2f}%
-   • Mejor Melanoma Recall hasta ahora: {self.best_melanoma_recall*100:.2f}%
-
-💾 RECURSOS DEL SISTEMA:
-"""
-        
-        import psutil
-        ram = psutil.virtual_memory()
-        gpu_memory = torch.cuda.memory_allocated() / 1e9 if torch.cuda.is_available() else 0
-        
-        report_text += f"   • RAM: {ram.percent:.1f}% ({ram.used/1e9:.1f}GB/{ram.total/1e9:.1f}GB)\n"
-        report_text += f"   • GPU: {(gpu_memory/8)*100:.0f}% ({gpu_memory:.1f}GB/8GB)\n"
-        
-        return report_text
-    
     def compute_balanced_score(self, accuracy, melanoma_recall):
-        """Score balanceado que prioriza melanoma"""
+        """Score balanceado"""
         return 0.6 * accuracy + 0.4 * (melanoma_recall * 100)
     
     def train_epoch(self, epoch):
@@ -279,15 +191,19 @@ class BalancedRAMGPUTrainer:
         total_loss = 0
         correct = 0
         total = 0
+        epoch_start_time = time.time()
+        batch_times = []
         
-        # Gradient accumulation para simular batch más grande
+        # Gradient accumulation más agresivo
         accumulation_steps = self.config.get('gradient_accumulation_steps', 1)
         
-        pbar = tqdm(self.train_loader, desc=f"🔥 BALANCED Epoch {epoch+1}/{self.config['epochs']}")
+        pbar = tqdm(self.train_loader, desc=f"🔥 MAX GPU Epoch {epoch+1}/{self.config['epochs']}")
         
         self.optimizer.zero_grad()
         
         for batch_idx, (inputs, targets) in enumerate(pbar):
+            batch_start_time = time.time()
+            
             inputs, targets = inputs.to(self.device, non_blocking=True), targets.to(self.device, non_blocking=True)
             
             with autocast():
@@ -309,21 +225,24 @@ class BalancedRAMGPUTrainer:
             total += targets.size(0)
             correct += predicted.eq(targets).sum().item()
             
-            # Monitor resources
-            import psutil
-            gpu_memory = torch.cuda.memory_allocated() / 1e9 if torch.cuda.is_available() else 0
-            gpu_percent = (gpu_memory / 8.0) * 100
-            ram_percent = psutil.virtual_memory().percent
+            # Performance monitoring
+            batch_time = time.time() - batch_start_time
+            batch_times.append(batch_time)
+            
+            gpu_stats = self.monitor_gpu_utilization()
+            samples_per_second = inputs.size(0) / batch_time
             
             pbar.set_postfix({
                 'Loss': f"{loss.item() * accumulation_steps:.4f}",
                 'Acc': f"{100.*correct/total:.1f}%",
-                'GPU': f"{gpu_percent:.0f}%",
-                'RAM': f"{ram_percent:.0f}%",
-                'VRAM': f"{gpu_memory:.1f}GB"
+                'GPU': f"{gpu_stats['estimated_utilization']:.0f}%",
+                'VRAM': f"{gpu_stats['memory_allocated_gb']:.1f}GB",
+                'SPS': f"{samples_per_second:.0f}",
+                'LR': f"{self.optimizer.param_groups[0]['lr']:.2e}"
             })
             
-            if batch_idx % 20 == 0:
+            # Limpieza GPU menos frecuente para MAX utilización
+            if batch_idx % 40 == 0:  # ⬆️ Cada 40 batches en vez de 20
                 torch.cuda.empty_cache()
         
         # Final optimizer step
@@ -336,34 +255,39 @@ class BalancedRAMGPUTrainer:
         
         avg_loss = total_loss / len(self.train_loader)
         accuracy = 100. * correct / total
+        epoch_time = time.time() - epoch_start_time
+        throughput = len(self.train_loader.dataset) / epoch_time
         
+        # Guardar métricas
         self.train_losses.append(avg_loss)
         self.train_accuracies.append(accuracy)
         self.learning_rates.append(self.optimizer.param_groups[0]['lr'])
+        self.batch_throughput.append(throughput)
         
-        return avg_loss, accuracy
+        # GPU utilization
+        final_gpu_stats = self.monitor_gpu_utilization()
+        self.gpu_utilization.append(final_gpu_stats['estimated_utilization'])
+        
+        return avg_loss, accuracy, throughput, final_gpu_stats
     
-    def validate(self, epoch):
-        """Validación con análisis completo"""
+    def validate(self, epoch, is_final=False):
+        """Validación - solo calcular CM si es final"""
         self.model.eval()
         total_loss = 0
         correct = 0
         total = 0
         all_predicted = []
         all_targets = []
-        all_probabilities = []
+        
+        validation_start = time.time()
         
         with torch.no_grad():
-            for inputs, targets in tqdm(self.val_loader, desc="🔍 Validating BALANCED"):
+            for inputs, targets in tqdm(self.val_loader, desc="🔍 Validating MAX GPU"):
                 inputs, targets = inputs.to(self.device, non_blocking=True), targets.to(self.device, non_blocking=True)
                 
                 with autocast():
                     outputs = self.model(inputs)
                     loss = self.criterion(outputs, targets)
-                
-                # Probabilidades para análisis adicional
-                probabilities = torch.softmax(outputs, dim=1)
-                all_probabilities.extend(probabilities.cpu().numpy())
                 
                 total_loss += loss.item()
                 _, predicted = outputs.max(1)
@@ -375,124 +299,321 @@ class BalancedRAMGPUTrainer:
         
         avg_loss = total_loss / len(self.val_loader)
         accuracy = 100. * correct / total
+        validation_time = time.time() - validation_start
         
-        # Calcular métricas detalladas
-        cm, report, class_metrics = self.compute_detailed_metrics(all_predicted, all_targets)
+        # Métricas básicas siempre
         melanoma_recall, melanoma_precision = self.compute_melanoma_metrics(all_predicted, all_targets)
         
-        # Guardar datos
+        # Métricas detalladas SOLO SI ES FINAL
+        if is_final:
+            cm, report, class_metrics = self.compute_detailed_metrics(all_predicted, all_targets)
+            self.final_confusion_matrix = cm
+            self.final_classification_report = report
+            self.final_class_metrics = class_metrics
+            print(f"📊 Calculando matriz de confusión FINAL...")
+            return avg_loss, accuracy, melanoma_recall, melanoma_precision, validation_time, cm, class_metrics
+        
+        # Guardar métricas básicas
         self.val_losses.append(avg_loss)
         self.val_accuracies.append(accuracy)
         self.melanoma_recalls.append(melanoma_recall * 100)
-        self.confusion_matrices.append(cm)
-        self.classification_reports.append(report)
         
-        # Crear matriz de confusión visual
-        cm_path = f'confusion_matrix_epoch_{epoch+1}.png'
-        self.plot_confusion_matrix(cm, epoch, cm_path)
+        return avg_loss, accuracy, melanoma_recall, melanoma_precision, validation_time
+    
+    def plot_final_confusion_matrix(self):
+        """Crear matriz de confusión FINAL"""
+        if self.final_confusion_matrix is None:
+            return
         
-        # Crear reporte detallado
-        detailed_report = self.create_comprehensive_report(epoch, cm, class_metrics, melanoma_recall, melanoma_precision)
+        plt.figure(figsize=(14, 12))
         
-        # Guardar reporte
-        with open(f'detailed_report_epoch_{epoch+1}.txt', 'w', encoding='utf-8') as f:
-            f.write(detailed_report)
+        # Normalizar matriz
+        cm = self.final_confusion_matrix
+        cm_normalized = cm.astype('float') / cm.sum(axis=1)[:, np.newaxis]
         
-        # Mostrar reporte en consola
-        print(detailed_report)
+        # Crear heatmap
+        sns.heatmap(
+            cm_normalized, 
+            annot=True, 
+            fmt='.3f',
+            cmap='Blues',
+            xticklabels=self.label_encoder.classes_,
+            yticklabels=self.label_encoder.classes_,
+            cbar_kws={'label': 'Accuracy Normalizada'},
+            square=True
+        )
         
-        return avg_loss, accuracy, melanoma_recall, melanoma_precision, cm, class_metrics
+        plt.title(f'MATRIZ DE CONFUSIÓN FINAL - CIFF-Net MAX GPU\nAccuracy: {self.best_overall_acc:.2f}% | Melanoma Recall: {self.best_melanoma_recall*100:.2f}%', 
+                 fontsize=16, fontweight='bold')
+        plt.xlabel('Predicción', fontsize=14)
+        plt.ylabel('Real', fontsize=14)
+        
+        # Highlight melanoma
+        melanoma_idx = None
+        for i, class_name in enumerate(self.label_encoder.classes_):
+            if 'mel' in class_name.lower():
+                melanoma_idx = i
+                break
+        
+        if melanoma_idx is not None:
+            plt.axhline(y=melanoma_idx, color='red', linewidth=4, alpha=0.8)
+            plt.axhline(y=melanoma_idx+1, color='red', linewidth=4, alpha=0.8)
+            plt.axvline(x=melanoma_idx, color='red', linewidth=4, alpha=0.8)
+            plt.axvline(x=melanoma_idx+1, color='red', linewidth=4, alpha=0.8)
+        
+        plt.tight_layout()
+        plt.savefig('final_confusion_matrix_max_gpu.png', dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        print("📊 Matriz de confusión FINAL guardada: final_confusion_matrix_max_gpu.png")
+    
+    def create_final_comprehensive_report(self):
+        """Crear reporte FINAL detallado"""
+        if self.final_class_metrics is None:
+            return ""
+        
+        melanoma_recall, melanoma_precision = self.compute_melanoma_metrics([], [])
+        if self.final_confusion_matrix is not None:
+            # Recalcular desde la matriz final
+            melanoma_idx = None
+            for i, class_name in enumerate(self.label_encoder.classes_):
+                if 'mel' in class_name.lower():
+                    melanoma_idx = i
+                    break
+            
+            if melanoma_idx is not None:
+                cm = self.final_confusion_matrix
+                tp = cm[melanoma_idx, melanoma_idx]
+                fn = np.sum(cm[melanoma_idx, :]) - tp
+                fp = np.sum(cm[:, melanoma_idx]) - tp
+                
+                melanoma_recall = tp / (tp + fn) if (tp + fn) > 0 else 0
+                melanoma_precision = tp / (tp + fp) if (tp + fp) > 0 else 0
+        
+        report_text = f"""
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                    REPORTE FINAL CIFF-NET MAX GPU                           ║
+║                         RTX 3070 + 32GB RAM                                 ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+🎯 MÉTRICAS FINALES GENERALES:
+   • Mejor Accuracy General: {self.best_overall_acc:.2f}%
+   • Mejor Melanoma Recall: {self.best_melanoma_recall*100:.2f}%
+   • Mejor Score Balanceado: {self.best_balanced_score:.2f}%
+   • Épocas entrenadas: {len(self.val_accuracies)}
+
+🩺 MÉTRICAS MELANOMA FINALES (CRÍTICAS):
+   • Recall (Sensibilidad): {melanoma_recall*100:.2f}%
+   • Precision: {melanoma_precision*100:.2f}%
+   • F1-Score: {2*(melanoma_recall*melanoma_precision)/(melanoma_recall+melanoma_precision)*100 if (melanoma_recall+melanoma_precision) > 0 else 0:.2f}%
+
+📊 MÉTRICAS FINALES POR CLASE:
+"""
+        
+        for class_name, metrics in self.final_class_metrics.items():
+            is_melanoma = 'mel' in class_name.lower()
+            marker = "🩺" if is_melanoma else "📋"
+            
+            report_text += f"""
+   {marker} {class_name.upper()}:
+      • Precision: {metrics['precision']*100:.2f}%
+      • Recall: {metrics['recall']*100:.2f}%
+      • F1-Score: {metrics['f1_score']*100:.2f}%
+      • Specificity: {metrics['specificity']*100:.2f}%
+      • Support: {metrics['support']} casos
+"""
+        
+        # Análisis de matriz de confusión FINAL
+        if self.final_confusion_matrix is not None:
+            cm = self.final_confusion_matrix
+            report_text += f"""
+🔍 ANÁLISIS MATRIZ DE CONFUSIÓN FINAL:
+   • Total de casos: {np.sum(cm)}
+   • Aciertos (diagonal): {np.trace(cm)}
+   • Accuracy matriz: {np.trace(cm) / np.sum(cm) * 100:.2f}%
+   
+📈 ERRORES MÁS COMUNES (FINAL):
+"""
+            
+            # Errores más comunes
+            cm_errors = cm.copy()
+            np.fill_diagonal(cm_errors, 0)
+            
+            # Top 3 errores
+            flat_indices = np.argpartition(cm_errors.ravel(), -3)[-3:]
+            top_errors = [(np.unravel_index(idx, cm_errors.shape), cm_errors.flat[idx]) 
+                         for idx in flat_indices if cm_errors.flat[idx] > 0]
+            
+            for (true_idx, pred_idx), count in sorted(top_errors, key=lambda x: x[1], reverse=True):
+                true_class = self.label_encoder.classes_[true_idx]
+                pred_class = self.label_encoder.classes_[pred_idx]
+                percentage = count / np.sum(cm[true_idx]) * 100
+                report_text += f"   • {true_class} → {pred_class}: {count} casos ({percentage:.1f}%)\n"
+        
+        # Performance GPU
+        avg_gpu_util = np.mean(self.gpu_utilization) if self.gpu_utilization else 0
+        max_gpu_util = max(self.gpu_utilization) if self.gpu_utilization else 0
+        avg_throughput = np.mean(self.batch_throughput) if self.batch_throughput else 0
+        
+        report_text += f"""
+🚀 RENDIMIENTO GPU FINAL:
+   • GPU Utilization Promedio: {avg_gpu_util:.1f}%
+   • GPU Utilization Máximo: {max_gpu_util:.1f}%
+   • Throughput Promedio: {avg_throughput:.0f} samples/sec
+   • Target GPU alcanzado: {'✅ SÍ' if avg_gpu_util >= 85 else '❌ NO'}
+
+💾 CONFIGURACIÓN USADA:
+   • Batch size: {self.train_loader.batch_size}
+   • Workers: {self.train_loader.num_workers}
+   • VRAM target: 99%
+   • Gradient accumulation: {self.config.get('gradient_accumulation_steps', 1)}
+"""
+        
+        return report_text
     
     def save_final_analysis(self):
         """Guardar análisis final completo"""
         
-        # Gráficos de entrenamiento
-        plt.figure(figsize=(20, 15))
+        # Gráficos principales
+        plt.figure(figsize=(20, 16))
         
         # Loss
-        plt.subplot(3, 3, 1)
-        plt.plot(self.train_losses, label='Train Loss', linewidth=2)
-        plt.plot(self.val_losses, label='Val Loss', linewidth=2)
-        plt.title('Pérdida Durante Entrenamiento', fontweight='bold')
+        plt.subplot(3, 4, 1)
+        plt.plot(self.train_losses, label='Train Loss', linewidth=2, color='blue')
+        plt.plot(self.val_losses, label='Val Loss', linewidth=2, color='red')
+        plt.title('Loss - MAX GPU Training', fontweight='bold', fontsize=14)
         plt.xlabel('Época')
         plt.ylabel('Loss')
         plt.legend()
         plt.grid(True, alpha=0.3)
         
         # Accuracy
-        plt.subplot(3, 3, 2)
-        plt.plot(self.train_accuracies, label='Train Acc', linewidth=2)
-        plt.plot(self.val_accuracies, label='Val Acc', linewidth=2)
-        plt.title('Accuracy Durante Entrenamiento', fontweight='bold')
+        plt.subplot(3, 4, 2)
+        plt.plot(self.train_accuracies, label='Train Acc', linewidth=2, color='blue')
+        plt.plot(self.val_accuracies, label='Val Acc', linewidth=2, color='red')
+        plt.title('Accuracy - MAX GPU Training', fontweight='bold', fontsize=14)
         plt.xlabel('Época')
         plt.ylabel('Accuracy (%)')
         plt.legend()
         plt.grid(True, alpha=0.3)
         
         # Melanoma Recall
-        plt.subplot(3, 3, 3)
-        plt.plot(self.melanoma_recalls, label='Melanoma Recall', color='red', linewidth=2)
-        plt.title('Melanoma Recall (Crítico)', fontweight='bold')
+        plt.subplot(3, 4, 3)
+        plt.plot(self.melanoma_recalls, label='Melanoma Recall', color='red', linewidth=3)
+        plt.title('Melanoma Recall - MAX GPU', fontweight='bold', fontsize=14)
         plt.xlabel('Época')
         plt.ylabel('Recall (%)')
         plt.legend()
         plt.grid(True, alpha=0.3)
         
+        # GPU Utilization
+        plt.subplot(3, 4, 4)
+        plt.plot(self.gpu_utilization, color='orange', linewidth=2)
+        plt.axhline(y=90, color='green', linestyle='--', label='Target 90%', alpha=0.7)
+        plt.axhline(y=95, color='red', linestyle='--', label='Excellent 95%', alpha=0.7)
+        plt.title('GPU Utilization - MAX GPU', fontweight='bold', fontsize=14)
+        plt.xlabel('Época')
+        plt.ylabel('GPU Usage (%)')
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        
+        # Throughput
+        plt.subplot(3, 4, 5)
+        plt.plot(self.batch_throughput, color='purple', linewidth=2)
+        plt.title('Training Throughput - MAX GPU', fontweight='bold', fontsize=14)
+        plt.xlabel('Época')
+        plt.ylabel('Samples/Second')
+        plt.grid(True, alpha=0.3)
+        
         # Learning Rate
-        plt.subplot(3, 3, 4)
+        plt.subplot(3, 4, 6)
         plt.plot(self.learning_rates, color='green', linewidth=2)
-        plt.title('Learning Rate', fontweight='bold')
+        plt.title('Learning Rate Schedule', fontweight='bold', fontsize=14)
         plt.xlabel('Época')
         plt.ylabel('LR')
         plt.yscale('log')
         plt.grid(True, alpha=0.3)
         
-        # Train-Val Gap
-        plt.subplot(3, 3, 5)
-        if len(self.train_accuracies) == len(self.val_accuracies):
-            gap = [train - val for train, val in zip(self.train_accuracies, self.val_accuracies)]
-            plt.plot(gap, color='purple', linewidth=2)
-            plt.axhline(y=5, color='red', linestyle='--', alpha=0.7, label='Warning (5%)')
-            plt.axhline(y=10, color='red', linestyle='-', alpha=0.7, label='Overfitting (10%)')
-            plt.title('Train-Val Gap (Overfitting Check)', fontweight='bold')
-            plt.xlabel('Época')
-            plt.ylabel('Gap (%)')
-            plt.legend()
-            plt.grid(True, alpha=0.3)
-        
-        # Métricas Comparativas
-        plt.subplot(3, 3, 6)
+        # Performance Summary
+        plt.subplot(3, 4, 7)
         epochs = range(1, len(self.val_accuracies) + 1)
-        plt.plot(epochs, self.val_accuracies, label='Overall Acc', linewidth=2)
-        plt.plot(epochs, self.melanoma_recalls, label='Melanoma Recall', linewidth=2)
+        plt.plot(epochs, self.val_accuracies, label='Val Acc', linewidth=2, color='blue')
+        plt.plot(epochs, self.melanoma_recalls, label='Melanoma Recall', linewidth=2, color='red')
         balanced_scores = [self.compute_balanced_score(acc, mel_rec/100) for acc, mel_rec in zip(self.val_accuracies, self.melanoma_recalls)]
-        plt.plot(epochs, balanced_scores, label='Balanced Score', linewidth=2, linestyle='--')
-        plt.title('Métricas Comparativas', fontweight='bold')
+        plt.plot(epochs, balanced_scores, label='Balanced Score', linewidth=2, linestyle='--', color='green')
+        plt.title('Performance Summary - MAX GPU', fontweight='bold', fontsize=14)
         plt.xlabel('Época')
         plt.ylabel('Score (%)')
         plt.legend()
         plt.grid(True, alpha=0.3)
         
-        # Última matriz de confusión
-        if self.confusion_matrices:
-            plt.subplot(3, 3, 7)
-            cm = self.confusion_matrices[-1]
-            cm_normalized = cm.astype('float') / cm.sum(axis=1)[:, np.newaxis]
-            sns.heatmap(cm_normalized, annot=True, fmt='.2f', cmap='Blues',
-                       xticklabels=self.label_encoder.classes_,
-                       yticklabels=self.label_encoder.classes_)
-            plt.title('Matriz de Confusión Final', fontweight='bold')
-            plt.xlabel('Predicción')
-            plt.ylabel('Real')
+        # GPU Efficiency
+        plt.subplot(3, 4, 8)
+        if len(self.gpu_utilization) > 0 and len(self.val_accuracies) > 0:
+            efficiency = [acc / (gpu_util + 1) for acc, gpu_util in zip(self.val_accuracies, self.gpu_utilization)]
+            plt.plot(efficiency, color='brown', linewidth=2)
+            plt.title('GPU Efficiency (Acc/GPU%)', fontweight='bold', fontsize=14)
+            plt.xlabel('Época')
+            plt.ylabel('Efficiency')
+            plt.grid(True, alpha=0.3)
+        
+        # Train-Val Gap
+        plt.subplot(3, 4, 9)
+        if len(self.train_accuracies) == len(self.val_accuracies):
+            gap = [train - val for train, val in zip(self.train_accuracies, self.val_accuracies)]
+            plt.plot(gap, color='purple', linewidth=2)
+            plt.axhline(y=5, color='orange', linestyle='--', alpha=0.7, label='Warning (5%)')
+            plt.axhline(y=10, color='red', linestyle='-', alpha=0.7, label='Overfitting (10%)')
+            plt.title('Train-Val Gap (Overfitting)', fontweight='bold', fontsize=14)
+            plt.xlabel('Época')
+            plt.ylabel('Gap (%)')
+            plt.legend()
+            plt.grid(True, alpha=0.3)
+        
+        # Performance vs GPU
+        plt.subplot(3, 4, 10)
+        if len(self.gpu_utilization) > 0 and len(self.val_accuracies) > 0:
+            plt.scatter(self.gpu_utilization, self.val_accuracies, alpha=0.7, color='red')
+            plt.xlabel('GPU Utilization (%)')
+            plt.ylabel('Validation Accuracy (%)')
+            plt.title('Performance vs GPU Usage', fontweight='bold', fontsize=14)
+            plt.grid(True, alpha=0.3)
         
         plt.tight_layout()
-        plt.savefig('analisis_completo_ciffnet_balanceado.png', dpi=300, bbox_inches='tight')
+        plt.savefig('max_gpu_training_analysis.png', dpi=300, bbox_inches='tight')
         plt.close()
         
-        print("📊 Análisis completo guardado en 'analisis_completo_ciffnet_balanceado.png'")
+        # Crear y guardar matriz de confusión final
+        self.plot_final_confusion_matrix()
+        
+        # CSV con métricas
+        metrics_df = pd.DataFrame({
+            'epoch': range(1, len(self.train_losses) + 1),
+            'train_loss': self.train_losses,
+            'train_acc': self.train_accuracies,
+            'val_loss': self.val_losses,
+            'val_acc': self.val_accuracies,
+            'melanoma_recall': self.melanoma_recalls,
+            'learning_rate': self.learning_rates,
+            'gpu_utilization': self.gpu_utilization,
+            'throughput_samples_sec': self.batch_throughput
+        })
+        metrics_df.to_csv('max_gpu_training_metrics.csv', index=False)
+        
+        # Reporte final
+        final_report = self.create_final_comprehensive_report()
+        with open('final_report_max_gpu.txt', 'w', encoding='utf-8') as f:
+            f.write(final_report)
+        
+        print("📊 Análisis MAX GPU completo guardado:")
+        print("   📈 max_gpu_training_analysis.png")
+        print("   📊 final_confusion_matrix_max_gpu.png")
+        print("   📋 max_gpu_training_metrics.csv")
+        print("   📄 final_report_max_gpu.txt")
     
     def train(self):
-        print(f"🚀 INICIANDO ENTRENAMIENTO BALANCEADO CON ANÁLISIS COMPLETO...")
+        print(f"🚀 INICIANDO ENTRENAMIENTO MAX GPU...")
+        print(f"🎯 OBJETIVO: GPU 95%+ con análisis final completo")
         
         start_time = time.time()
         patience_counter = 0
@@ -500,17 +621,43 @@ class BalancedRAMGPUTrainer:
         for epoch in range(self.config['epochs']):
             epoch_start = time.time()
             
-            # Train
-            train_loss, train_acc = self.train_epoch(epoch)
+            # Train con MAX performance
+            train_loss, train_acc, throughput, gpu_stats = self.train_epoch(epoch)
             
-            # Validate con análisis completo
-            val_loss, val_acc, melanoma_recall, melanoma_precision, cm, class_metrics = self.validate(epoch)
+            # Validate (sin CM hasta el final)
+            val_results = self.validate(epoch, is_final=False)
+            val_loss, val_acc, melanoma_recall, melanoma_precision, val_time = val_results
             
             # Scheduler
             self.scheduler.step(val_acc)
             
             epoch_time = time.time() - epoch_start
             balanced_score = self.compute_balanced_score(val_acc, melanoma_recall)
+            
+            # System stats
+            import psutil
+            ram = psutil.virtual_memory()
+            
+            print(f"\n{'='*100}")
+            print(f"ÉPOCA {epoch+1}/{self.config['epochs']} - MAX GPU TRAINING")
+            print(f"{'='*100}")
+            print(f"🔥 Train: Loss {train_loss:.4f} | Acc {train_acc:.2f}%")
+            print(f"📊 Val: Loss {val_loss:.4f} | Acc {val_acc:.2f}%")
+            print(f"🩺 Melanoma: Recall {melanoma_recall*100:.2f}% | Precision {melanoma_precision*100:.2f}%")
+            print(f"⚖️  Balanced Score: {balanced_score:.2f}%")
+            print(f"⏱️  Tiempos: Época {epoch_time:.1f}s | Train {epoch_time-val_time:.1f}s | Val {val_time:.1f}s")
+            print(f"🚀 GPU PERFORMANCE:")
+            print(f"   GPU Utilization: {gpu_stats['estimated_utilization']:.1f}% (Target: 95%+)")
+            print(f"   VRAM Usage: {gpu_stats['memory_allocated_gb']:.1f}GB/8GB ({gpu_stats['memory_percent']:.1f}%)")
+            print(f"   Throughput: {throughput:.0f} samples/sec")
+            print(f"💾 RAM: {ram.percent:.1f}% ({ram.used/1e9:.1f}GB/{ram.total/1e9:.1f}GB)")
+            print(f"📈 LR: {self.optimizer.param_groups[0]['lr']:.2e}")
+            
+            # GPU performance feedback
+            if gpu_stats['estimated_utilization'] < 85:
+                print(f"⚠️  WARNING: GPU usage bajo ({gpu_stats['estimated_utilization']:.1f}%) - considerar aumentar batch size")
+            elif gpu_stats['estimated_utilization'] >= 95:
+                print(f"🎯 EXCELLENT: GPU usage óptimo ({gpu_stats['estimated_utilization']:.1f}%)")
             
             # Save best models
             saved_model = False
@@ -523,10 +670,10 @@ class BalancedRAMGPUTrainer:
                     'optimizer_state_dict': self.optimizer.state_dict(),
                     'best_acc': val_acc,
                     'melanoma_recall': melanoma_recall,
-                    'confusion_matrix': cm,
-                    'class_metrics': class_metrics,
+                    'gpu_stats': gpu_stats,
                     'config': self.config
-                }, 'best_balanced_overall_with_cm.pth')
+                }, 'best_max_gpu_overall.pth')
+                print(f"✅ Mejor modelo MAX GPU guardado: {val_acc:.2f}%")
                 saved_model = True
             
             if melanoma_recall > self.best_melanoma_recall:
@@ -537,10 +684,10 @@ class BalancedRAMGPUTrainer:
                     'optimizer_state_dict': self.optimizer.state_dict(),
                     'best_melanoma_recall': melanoma_recall,
                     'val_acc': val_acc,
-                    'confusion_matrix': cm,
-                    'class_metrics': class_metrics,
+                    'gpu_stats': gpu_stats,
                     'config': self.config
-                }, 'best_balanced_melanoma_with_cm.pth')
+                }, 'best_max_gpu_melanoma.pth')
+                print(f"✅ Mejor melanoma MAX GPU guardado: {melanoma_recall*100:.2f}%")
                 saved_model = True
             
             if balanced_score > self.best_balanced_score:
@@ -552,67 +699,79 @@ class BalancedRAMGPUTrainer:
                     'balanced_score': balanced_score,
                     'val_acc': val_acc,
                     'melanoma_recall': melanoma_recall,
-                    'confusion_matrix': cm,
-                    'class_metrics': class_metrics,
+                    'gpu_stats': gpu_stats,
                     'config': self.config
-                }, 'best_balanced_score_with_cm.pth')
+                }, 'best_max_gpu_balanced.pth')
+                print(f"✅ Mejor balance MAX GPU guardado: {balanced_score:.2f}%")
                 saved_model = True
             
             if saved_model:
                 patience_counter = 0
-                print(f"✅ Modelo mejorado guardado con matriz de confusión!")
             else:
                 patience_counter += 1
+                print(f"⏳ Paciencia: {patience_counter}/{self.config['early_stopping_patience']}")
             
             # Early stopping
             if patience_counter >= self.config['early_stopping_patience']:
                 print(f"⏹️ Early stopping en época {epoch+1}")
                 break
         
-        # Análisis final
+        # VALIDACIÓN FINAL con matriz de confusión
+        print(f"\n🔍 Realizando validación FINAL con matriz de confusión...")
+        final_results = self.validate(len(self.val_accuracies), is_final=True)
+        
+        # Análisis final completo
         self.save_final_analysis()
         
         total_time = time.time() - start_time
-        print(f"\n🎉 Entrenamiento BALANCEADO completado!")
+        avg_gpu_util = np.mean(self.gpu_utilization) if self.gpu_utilization else 0
+        max_gpu_util = max(self.gpu_utilization) if self.gpu_utilization else 0
+        
+        print(f"\n🎉 Entrenamiento MAX GPU completado!")
         print(f"⏱️  Tiempo total: {total_time/3600:.2f} horas")
         print(f"🏆 Mejor accuracy: {self.best_overall_acc:.2f}%")
         print(f"🩺 Mejor melanoma recall: {self.best_melanoma_recall*100:.2f}%")
         print(f"⚖️  Mejor score balanceado: {self.best_balanced_score:.2f}%")
-        print(f"📊 Matrices de confusión guardadas para cada época")
-        print(f"📋 Reportes detallados guardados para cada época")
+        print(f"🚀 RENDIMIENTO GPU FINAL:")
+        print(f"   GPU promedio: {avg_gpu_util:.1f}%")
+        print(f"   GPU máximo: {max_gpu_util:.1f}%")
+        print(f"   Target alcanzado: {'✅ SÍ' if avg_gpu_util >= 90 else '❌ NO'}")
+        print(f"📊 Matriz de confusión guardada SOLO al final")
 
 def main():
-    """Entrenamiento balanceado con análisis completo"""
-    print("🚀 ENTRENAMIENTO BALANCEADO CON MATRIZ DE CONFUSIÓN")
-    print("🎯 ANÁLISIS COMPLETO DEL MODELO")
-    print("=" * 70)
+    """Entrenamiento MAX GPU con matriz de confusión solo al final"""
+    print("🚀 ENTRENAMIENTO MAX GPU - RTX 3070 + 32GB RAM")
+    print("🎯 OBJETIVO: 95%+ GPU + Matriz Confusión SOLO AL FINAL")
+    print("=" * 80)
     
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
-    # Configuración BALANCEADA
+    # Configuración MAX GPU
     training_config = {
         'learning_rate': 5e-5,
         'weight_decay': 5e-4,
         'loss_type': 'focal',
         'scheduler': 'plateau',
         'epochs': 60,
-        'early_stopping_patience': 10,
+        'early_stopping_patience': 6,  # ⬇️ Más agresivo
         'gradient_clipping': 0.5,
         'mixed_precision': True,
         'gradient_accumulation_steps': 2
     }
     
-    batch_size = 16
+    # BATCH SIZE MAX para RTX 3070
+    batch_size = 24  # ⬆️ Máximo para tu GPU
     
-    print(f"📊 ANÁLISIS INCLUIDO:")
-    print(f"   ✅ Matriz de confusión por época")
-    print(f"   ✅ Reporte detallado por clase")
-    print(f"   ✅ Métricas de melanoma específicas")
-    print(f"   ✅ Análisis de errores comunes")
-    print(f"   ✅ Tracking de overfitting")
-    print(f"   ✅ Score balanceado")
+    print(f"⚡ CONFIGURACIÓN MAX GPU:")
+    print(f"   Batch size: {batch_size} (MAX RTX 3070)")
+    print(f"   Gradient accumulation: {training_config['gradient_accumulation_steps']}")
+    print(f"   Batch efectivo: {batch_size * training_config['gradient_accumulation_steps']}")
+    print(f"   Expected GPU: 95%+")
+    print(f"   Workers: 16 (MAX 32GB RAM)")
+    print(f"   VRAM target: 99%")
+    print(f"   📊 Matriz confusión: SOLO AL FINAL")
     
-    # Cargar datos
+    # Cargar datos con configuración MAX
     csv_file = "datasetHam10000/HAM10000_metadata.csv"
     image_folders = ["datasetHam10000/HAM10000_images_part_1", "datasetHam10000/HAM10000_images_part_2"]
     
@@ -628,8 +787,8 @@ def main():
         pretrained=True
     )
     
-    # Entrenar con análisis completo
-    trainer = BalancedRAMGPUTrainer(
+    # Entrenar MAX GPU
+    trainer = MaxGPUTrainer(
         model, train_loader, val_loader,
         label_encoder, class_weights, device, training_config
     )

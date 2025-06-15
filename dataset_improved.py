@@ -241,9 +241,9 @@ val_transform_improved = transforms.Compose([
 ])
 
 def create_improved_data_loaders(csv_file, image_folders, batch_size=24, test_size=0.2):
-    """Crear DataLoaders optimizados para RTX 3070"""
+    """Crear DataLoaders MAX GPU para RTX 3070 + 32GB RAM"""
     
-    print(f"📂 Cargando datos mejorados desde: {csv_file}")
+    print(f"📂 Cargando datos MAX GPU desde: {csv_file}")
     
     # Verificar archivos
     if not os.path.exists(csv_file):
@@ -277,20 +277,20 @@ def create_improved_data_loaders(csv_file, image_folders, batch_size=24, test_si
         oversample_minorities=False
     )
     
-    # CONFIGURACIÓN MÁXIMA GPU USAGE
-    num_workers = 16        # ⬆️ MÁXIMO workers
+    # CONFIGURACIÓN MAX GPU
+    num_workers = 16        # ⬆️ MÁXIMO para 32GB RAM
     pin_memory = True
-    prefetch_factor = 4     # ⬆️ MÁXIMO prefetch
+    prefetch_factor = 6     # ⬆️ MÁXIMO para throughput
     persistent_workers = True
     
-    print(f"⚙️  Configuración MÁXIMA GPU RTX 3070:")
-    print(f"   Batch size: {batch_size}")
-    print(f"   Workers: {num_workers}")
+    print(f"⚙️  Configuración MAX GPU:")
+    print(f"   Batch size: {batch_size} (MAX RTX 3070)")
+    print(f"   Workers: {num_workers} (MAX 32GB RAM)")
     print(f"   Prefetch factor: {prefetch_factor}")
-    print(f"   Pin memory: {pin_memory}")
-    print(f"   Persistent workers: {persistent_workers}")
+    print(f"   Target GPU: 95%+")
+    print(f"   Target VRAM: 7.5GB+")
     
-    # DataLoaders OPTIMIZADOS AL MÁXIMO
+    # DataLoaders MAX GPU
     train_loader = DataLoader(
         train_data,
         batch_size=batch_size,
@@ -300,7 +300,8 @@ def create_improved_data_loaders(csv_file, image_folders, batch_size=24, test_si
         persistent_workers=persistent_workers,
         prefetch_factor=prefetch_factor,
         drop_last=True,
-        multiprocessing_context='spawn'  # ⬆️ NUEVO - mejor rendimiento Windows
+        multiprocessing_context='spawn',
+        timeout=120
     )
     
     val_loader = DataLoader(
@@ -311,9 +312,10 @@ def create_improved_data_loaders(csv_file, image_folders, batch_size=24, test_si
         pin_memory=pin_memory,
         persistent_workers=persistent_workers,
         prefetch_factor=prefetch_factor,
-        multiprocessing_context='spawn'  # ⬆️ NUEVO
+        multiprocessing_context='spawn',
+        timeout=120
     )
     
-    print(f"🚀 DataLoaders MÁXIMO RENDIMIENTO creados!")
+    print(f"🚀 DataLoaders MAX GPU creados!")
     
     return train_loader, val_loader, train_data.label_encoder, train_data.get_class_weights_tensor()
