@@ -40,16 +40,17 @@ class ImprovedCIFFNetTrainer:
             eps=1e-8
         )
         
-        # Scheduler adaptativo
+        # Scheduler adaptativo - ARREGLADO
         if config['scheduler'] == 'plateau':
             self.scheduler = ReduceLROnPlateau(
                 self.optimizer, 
                 mode='max',
                 factor=0.5,
                 patience=5,
-                verbose=True,
                 min_lr=1e-7
+                # verbose=True  ← REMOVIDO (no existe en PyTorch)
             )
+            self.scheduler_verbose = True  # Flag manual para prints
         else:
             self.scheduler = CosineAnnealingWarmRestarts(
                 self.optimizer,
@@ -57,6 +58,7 @@ class ImprovedCIFFNetTrainer:
                 T_mult=2,
                 eta_min=1e-7
             )
+            self.scheduler_verbose = False
         
         # Loss mejorado
         if config['loss_type'] == 'focal':
@@ -76,11 +78,18 @@ class ImprovedCIFFNetTrainer:
         self.val_losses = []
         self.val_accuracies = []
         self.melanoma_recalls = []  # Específico para melanoma
+        self.learning_rates = []    # Track LR changes
         
         # Best metrics tracking
         self.best_overall_acc = 0
         self.best_melanoma_recall = 0
         self.best_balanced_score = 0
+        
+        print(f"🚀 Trainer MEJORADO inicializado:")
+        print(f"   Optimizer: AdamW")
+        print(f"   Scheduler: {config['scheduler']}")
+        print(f"   Loss: {config['loss_type']}")
+        print(f"   LR inicial: {config['learning_rate']}")
         
     def compute_melanoma_metrics(self, all_predicted, all_targets):
         """Calcular métricas específicas para melanoma"""
@@ -161,6 +170,7 @@ class ImprovedCIFFNetTrainer:
         
         self.train_losses.append(avg_loss)
         self.train_accuracies.append(accuracy)
+        self.learning_rates.append(self.optimizer.param_groups[0]['lr'])
         
         return avg_loss, accuracy
     
@@ -245,11 +255,7 @@ class ImprovedCIFFNetTrainer:
         
         # Learning rate plot
         plt.subplot(2, 4, 4)
-        if hasattr(self.scheduler, 'get_last_lr'):
-            lrs = [self.scheduler.get_last_lr()[0] for _ in range(len(self.train_losses))]
-        else:
-            lrs = [self.config['learning_rate'] * (0.5 ** (i // 10)) for i in range(len(self.train_losses))]
-        plt.plot(lrs, color='green', linewidth=2)
+        plt.plot(self.learning_rates, color='green', linewidth=2)
         plt.title('Learning Rate', fontsize=14, fontweight='bold')
         plt.xlabel('Época')
         plt.ylabel('LR')
@@ -341,6 +347,7 @@ class ImprovedCIFFNetTrainer:
         
         start_time = time.time()
         patience_counter = 0
+        previous_lr = self.optimizer.param_groups[0]['lr']
         
         for epoch in range(self.config['epochs']):
             torch.cuda.empty_cache()
@@ -352,9 +359,16 @@ class ImprovedCIFFNetTrainer:
             # Validate
             val_loss, val_acc, all_predicted, all_targets, all_probs, melanoma_recall, melanoma_precision = self.validate()
             
-            # Scheduler step
+            # Scheduler step con verbose manual
+            current_lr = self.optimizer.param_groups[0]['lr']
             if isinstance(self.scheduler, ReduceLROnPlateau):
                 self.scheduler.step(val_acc)
+                new_lr = self.optimizer.param_groups[0]['lr']
+                
+                # Manual verbose para ReduceLROnPlateau
+                if self.scheduler_verbose and new_lr < previous_lr:
+                    print(f"📉 ReduceLROnPlateau: reducing learning rate to {new_lr:.2e}")
+                previous_lr = new_lr
             else:
                 self.scheduler.step()
             
