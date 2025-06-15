@@ -13,7 +13,7 @@ class MemoryEfficientMKSA(nn.Module):
         self.reduced_channels = max(in_channels // reduction, 8)
         self.max_spatial_size = max_spatial_size
         
-        # Solo 2 kernels para ahorrar memoria
+        # Solo convs 1x1 para ahorrar memoria
         self.query = nn.Conv2d(in_channels, self.reduced_channels, 1, bias=False)
         self.key = nn.Conv2d(in_channels, self.reduced_channels, 1, bias=False)
         self.value = nn.Conv2d(in_channels, in_channels, 1, bias=False)

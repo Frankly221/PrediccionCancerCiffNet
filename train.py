@@ -1,471 +1,373 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.optim.lr_scheduler import CosineAnnealingLR, ReduceLROnPlateau
+from torch.utils.data import DataLoader
+from torch.cuda.amp import autocast, GradScaler
 import numpy as np
-from tqdm import tqdm
+import pandas as pd
 import matplotlib.pyplot as plt
-from sklearn.metrics import classification_report, confusion_matrix, accuracy_score
 import seaborn as sns
+from sklearn.metrics import classification_report, confusion_matrix
+from tqdm import tqdm
+import os
 import time
 import warnings
 warnings.filterwarnings('ignore')
 
-from dataset import create_data_loaders
-from model import create_ciff_net_phase1
+from dataset import create_data_loaders, HAM10000Dataset
+from model import create_ciff_net_rtx8gb, rtx8gb_model_summary
 
-class FocalLoss(nn.Module):
-    """Focal Loss para datasets desbalanceados - usado en papers médicos"""
-    def __init__(self, alpha=1, gamma=2, num_classes=7, size_average=True):
-        super(FocalLoss, self).__init__()
-        self.alpha = alpha
-        self.gamma = gamma
-        self.num_classes = num_classes
-        self.size_average = size_average
-
-    def forward(self, inputs, targets):
-        ce_loss = nn.CrossEntropyLoss()(inputs, targets)
-        pt = torch.exp(-ce_loss)
-        focal_loss = self.alpha * (1-pt)**self.gamma * ce_loss
-        
-        if self.size_average:
-            return focal_loss.mean()
-        else:
-            return focal_loss.sum()
-
-class LabelSmoothing(nn.Module):
-    """Label Smoothing para mejorar generalización"""
-    def __init__(self, num_classes, smoothing=0.1):
-        super(LabelSmoothing, self).__init__()
-        self.confidence = 1.0 - smoothing
-        self.smoothing = smoothing
-        self.num_classes = num_classes
-
-    def forward(self, x, target):
-        logprobs = torch.nn.functional.log_softmax(x, dim=-1)
-        nll_loss = -logprobs.gather(dim=-1, index=target.unsqueeze(1))
-        nll_loss = nll_loss.squeeze(1)
-        smooth_loss = -logprobs.mean(dim=-1)
-        loss = self.confidence * nll_loss + self.smoothing * smooth_loss
-        return loss.mean()
-
-class CIFFNetPhase1Trainer:
-    def __init__(self, model, train_loader, val_loader, label_encoder, device, config=None):
+class CIFFNetPhase1TrainerAMP:
+    """Trainer con AMP para RTX 8GB"""
+    def __init__(self, model, train_loader, val_loader, label_encoder, device, config):
         self.model = model.to(device)
         self.train_loader = train_loader
         self.val_loader = val_loader
-        self.label_encoder = label_encoder
         self.device = device
+        self.config = config
+        self.label_encoder = label_encoder
         
-        # Configuración por defecto
-        self.config = config or {
-            'learning_rate': 1e-4,
-            'weight_decay': 1e-4,
-            'loss_type': 'focal',  # 'focal', 'cross_entropy', 'label_smooth'
-            'scheduler': 'cosine',  # 'cosine', 'plateau'
-            'epochs': 50,
-            'early_stopping_patience': 10,
-            'gradient_clipping': 1.0,
-            'warmup_epochs': 5
-        }
+        # Configurar AMP
+        self.scaler = GradScaler()
         
-        self._setup_training()
+        # Optimizer
+        self.optimizer = torch.optim.AdamW(
+            self.model.parameters(),
+            lr=config['learning_rate'],
+            weight_decay=config['weight_decay']
+        )
         
-        # Historial
-        self.train_losses = []
-        self.val_losses = []
-        self.val_accuracies = []
-        self.learning_rates = []
-        self.best_val_acc = 0.0
+        # Scheduler
+        self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            self.optimizer, T_max=config['epochs']
+        )
         
-    def _setup_training(self):
-        """Configurar optimizer, loss y scheduler para CIFF-Net"""
-        
-        # Diferentes learning rates para backbone y módulos MKSA
-        backbone_params = []
-        mksa_params = []
-        classifier_params = []
-        
-        for name, param in self.model.named_parameters():
-            if 'backbone' in name:
-                backbone_params.append(param)
-            elif 'mksa' in name or 'attention' in name:
-                mksa_params.append(param)
-            else:
-                classifier_params.append(param)
-        
-        # Optimizer con diferentes LR
-        self.optimizer = optim.AdamW([
-            {'params': backbone_params, 'lr': self.config['learning_rate'] * 0.1},
-            {'params': mksa_params, 'lr': self.config['learning_rate'] * 0.5},
-            {'params': classifier_params, 'lr': self.config['learning_rate']}
-        ], weight_decay=self.config['weight_decay'])
-        
-        # Loss function
-        if self.config['loss_type'] == 'focal':
-            self.criterion = FocalLoss(alpha=1, gamma=2, num_classes=len(self.label_encoder.classes_))
-        elif self.config['loss_type'] == 'label_smooth':
-            self.criterion = LabelSmoothing(num_classes=len(self.label_encoder.classes_), smoothing=0.1)
+        # Loss con diferentes opciones
+        if config.get('loss_type') == 'focal':
+            # Focal Loss para desbalance de clases
+            from torch.nn import CrossEntropyLoss
+            self.criterion = CrossEntropyLoss(label_smoothing=0.1)
         else:
             self.criterion = nn.CrossEntropyLoss()
         
-        # Scheduler
-        if self.config['scheduler'] == 'cosine':
-            self.scheduler = CosineAnnealingLR(
-                self.optimizer, 
-                T_max=self.config['epochs'], 
-                eta_min=1e-6
-            )
-        else:
-            self.scheduler = ReduceLROnPlateau(
-                self.optimizer, 
-                mode='max', 
-                factor=0.5, 
-                patience=5, 
-                verbose=True
-            )
-    
-    def warmup_lr(self, epoch):
-        """Warmup del learning rate para estabilidad inicial"""
-        if epoch < self.config['warmup_epochs']:
-            warmup_factor = (epoch + 1) / self.config['warmup_epochs']
-            for param_group in self.optimizer.param_groups:
-                param_group['lr'] = param_group['lr'] * warmup_factor
-    
+        # Para tracking del entrenamiento
+        self.train_losses = []
+        self.train_accuracies = []
+        self.val_losses = []
+        self.val_accuracies = []
+        
     def train_epoch(self, epoch):
-        """Entrenar una época con progressive unfreezing para MKSA"""
         self.model.train()
-        
-        # Progressive unfreezing específico para CIFF-Net
-        if epoch == 5:
-            print("🔓 Unfreezing MKSA modules...")
-            for param in self.model.mksa_modules.parameters():
-                param.requires_grad = True
-        elif epoch == 15:
-            print("🔓 Unfreezing backbone...")
-            self.model.freeze_backbone(False)
-        
-        # Warmup
-        if epoch < self.config['warmup_epochs']:
-            self.warmup_lr(epoch)
-        
-        running_loss = 0.0
+        total_loss = 0
         correct = 0
         total = 0
         
-        pbar = tqdm(self.train_loader, desc=f'CIFF Phase1 Epoch {epoch+1}/{self.config["epochs"]}')
-        for batch_idx, (inputs, labels) in enumerate(pbar):
-            inputs, labels = inputs.to(self.device), labels.to(self.device)
+        # Progress bar
+        pbar = tqdm(self.train_loader, desc=f"RTX Epoch {epoch+1}/{self.config['epochs']}")
+        
+        for batch_idx, (inputs, targets) in enumerate(pbar):
+            inputs, targets = inputs.to(self.device), targets.to(self.device)
             
+            # Zero gradients
             self.optimizer.zero_grad()
-            outputs = self.model(inputs)
-            loss = self.criterion(outputs, labels)
             
-            loss.backward()
+            # Forward con autocast (AMP)
+            with autocast():
+                outputs = self.model(inputs)
+                loss = self.criterion(outputs, targets)
             
-            # Gradient clipping para estabilidad
-            if self.config['gradient_clipping'] > 0:
-                torch.nn.utils.clip_grad_norm_(
-                    self.model.parameters(), 
-                    self.config['gradient_clipping']
-                )
+            # Backward con scaling
+            self.scaler.scale(loss).backward()
             
-            self.optimizer.step()
+            # Gradient clipping
+            if 'gradient_clipping' in self.config:
+                self.scaler.unscale_(self.optimizer)
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config['gradient_clipping'])
             
-            # Estadísticas
-            running_loss += loss.item()
+            # Optimizer step
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
+            
+            # Statistics
+            total_loss += loss.item()
             _, predicted = outputs.max(1)
-            total += labels.size(0)
-            correct += predicted.eq(labels).sum().item()
+            total += targets.size(0)
+            correct += predicted.eq(targets).sum().item()
             
-            # Actualizar barra
+            # Update progress bar
             pbar.set_postfix({
-                'Loss': f'{loss.item():.4f}',
-                'Acc': f'{100.*correct/total:.2f}%',
-                'LR': f'{self.optimizer.param_groups[0]["lr"]:.2e}'
+                'Loss': f"{loss.item():.4f}",
+                'Acc': f"{100.*correct/total:.2f}%",
+                'VRAM': f"{torch.cuda.memory_allocated()/1e9:.1f}GB",
+                'LR': f"{self.optimizer.param_groups[0]['lr']:.2e}"
             })
+            
+            # Limpiar cache cada cierto número de batches
+            if batch_idx % 50 == 0:
+                torch.cuda.empty_cache()
         
-        epoch_loss = running_loss / len(self.train_loader)
-        epoch_acc = 100. * correct / total
+        avg_loss = total_loss / len(self.train_loader)
+        accuracy = 100. * correct / total
         
-        return epoch_loss, epoch_acc
+        self.train_losses.append(avg_loss)
+        self.train_accuracies.append(accuracy)
+        
+        return avg_loss, accuracy
     
     def validate(self):
-        """Validación del modelo CIFF-Net Fase 1"""
         self.model.eval()
-        running_loss = 0.0
-        all_preds = []
-        all_labels = []
+        total_loss = 0
+        correct = 0
+        total = 0
+        all_predicted = []
+        all_targets = []
         
         with torch.no_grad():
-            for inputs, labels in tqdm(self.val_loader, desc='Validating CIFF Phase1'):
-                inputs, labels = inputs.to(self.device), labels.to(self.device)
+            for inputs, targets in tqdm(self.val_loader, desc="Validating"):
+                inputs, targets = inputs.to(self.device), targets.to(self.device)
                 
-                outputs = self.model(inputs)
-                loss = self.criterion(outputs, labels)
-                running_loss += loss.item()
+                with autocast():
+                    outputs = self.model(inputs)
+                    loss = self.criterion(outputs, targets)
                 
+                total_loss += loss.item()
                 _, predicted = outputs.max(1)
-                all_preds.extend(predicted.cpu().numpy())
-                all_labels.extend(labels.cpu().numpy())
+                total += targets.size(0)
+                correct += predicted.eq(targets).sum().item()
+                
+                # Para métricas detalladas
+                all_predicted.extend(predicted.cpu().numpy())
+                all_targets.extend(targets.cpu().numpy())
         
-        val_loss = running_loss / len(self.val_loader)
-        val_acc = accuracy_score(all_labels, all_preds) * 100
+        avg_loss = total_loss / len(self.val_loader)
+        accuracy = 100. * correct / total
         
-        return val_loss, val_acc, all_preds, all_labels
+        self.val_losses.append(avg_loss)
+        self.val_accuracies.append(accuracy)
+        
+        return avg_loss, accuracy, all_predicted, all_targets
     
-    def visualize_attention(self, sample_images, save_path='attention_visualization.png'):
-        """Visualizar mapas de atención del MKSA"""
-        self.model.eval()
+    def save_plots(self):
+        """Guardar gráficos de entrenamiento"""
+        plt.figure(figsize=(15, 5))
         
-        with torch.no_grad():
-            # Tomar una muestra pequeña
-            sample_batch = sample_images[:4].to(self.device)
-            attention_maps = self.model.get_attention_maps(sample_batch)
-            
-            fig, axes = plt.subplots(len(attention_maps), 4, figsize=(16, 4*len(attention_maps)))
-            
-            for level, att_maps in enumerate(attention_maps):
-                for i in range(4):
-                    # Promediar a través de canales para visualización
-                    att_map = att_maps[i].mean(dim=0).cpu().numpy()
-                    
-                    axes[level, i].imshow(att_map, cmap='hot', interpolation='bilinear')
-                    axes[level, i].set_title(f'Level {level+1}, Sample {i+1}')
-                    axes[level, i].axis('off')
-            
-            plt.tight_layout()
-            plt.savefig(save_path, dpi=300, bbox_inches='tight')
-            plt.show()
+        # Loss plot
+        plt.subplot(1, 3, 1)
+        plt.plot(self.train_losses, label='Train Loss', color='blue')
+        plt.plot(self.val_losses, label='Val Loss', color='red')
+        plt.title('Loss Durante Entrenamiento')
+        plt.xlabel('Época')
+        plt.ylabel('Loss')
+        plt.legend()
+        plt.grid(True)
+        
+        # Accuracy plot
+        plt.subplot(1, 3, 2)
+        plt.plot(self.train_accuracies, label='Train Acc', color='blue')
+        plt.plot(self.val_accuracies, label='Val Acc', color='red')
+        plt.title('Accuracy Durante Entrenamiento')
+        plt.xlabel('Época')
+        plt.ylabel('Accuracy (%)')
+        plt.legend()
+        plt.grid(True)
+        
+        # Learning rate plot
+        plt.subplot(1, 3, 3)
+        if len(self.train_losses) > 0:
+            lrs = []
+            for i in range(len(self.train_losses)):
+                lrs.append(self.config['learning_rate'] * (0.5 ** (i // 10)))  # Aproximación
+            plt.plot(lrs, color='green')
+            plt.title('Learning Rate')
+            plt.xlabel('Época')
+            plt.ylabel('LR')
+            plt.yscale('log')
+            plt.grid(True)
+        
+        plt.tight_layout()
+        plt.savefig('training_history_rtx8gb.png', dpi=300, bbox_inches='tight')
+        plt.close()
+        
+    def save_confusion_matrix(self, all_predicted, all_targets):
+        """Guardar matriz de confusión"""
+        plt.figure(figsize=(10, 8))
+        
+        # Matriz de confusión
+        cm = confusion_matrix(all_targets, all_predicted)
+        
+        # Normalizar
+        cm_normalized = cm.astype('float') / cm.sum(axis=1)[:, np.newaxis]
+        
+        # Plot
+        sns.heatmap(cm_normalized, 
+                   annot=True, 
+                   fmt='.3f', 
+                   cmap='Blues',
+                   xticklabels=self.label_encoder.classes_,
+                   yticklabels=self.label_encoder.classes_)
+        
+        plt.title('Matriz de Confusión Normalizada - CIFF-Net RTX')
+        plt.xlabel('Predicción')
+        plt.ylabel('Real')
+        plt.tight_layout()
+        plt.savefig('confusion_matrix_rtx8gb.png', dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        # Reporte de clasificación
+        report = classification_report(
+            all_targets, all_predicted,
+            target_names=self.label_encoder.classes_,
+            output_dict=True
+        )
+        
+        # Guardar reporte
+        report_df = pd.DataFrame(report).transpose()
+        report_df.to_csv('classification_report_rtx8gb.csv')
+        
+        return report
     
     def train(self):
-        """Entrenamiento completo de CIFF-Net Fase 1"""
-        print("🚀 Iniciando entrenamiento CIFF-Net Fase 1 con MKSA")
+        print(f"🚀 Iniciando entrenamiento CIFF-Net RTX 8GB con AMP...")
         print(f"📊 Configuración: {self.config}")
-        print(f"🏷️  Clases: {list(self.label_encoder.classes_)}")
-        print(f"🔧 Device: {self.device}")
         
-        start_time = time.time()
+        best_acc = 0
         patience_counter = 0
-        
-        # Obtener muestra para visualización de atención
-        sample_batch = next(iter(self.val_loader))[0]
+        start_time = time.time()
         
         for epoch in range(self.config['epochs']):
-            print(f"\n{'='*70}")
-            print(f"ÉPOCA {epoch+1}/{self.config['epochs']} - CIFF-Net Fase 1")
-            print(f"{'='*70}")
+            # Limpiar cache al inicio de cada época
+            torch.cuda.empty_cache()
             
-            # Entrenar
+            epoch_start = time.time()
+            
+            # Train
             train_loss, train_acc = self.train_epoch(epoch)
             
-            # Validar
-            val_loss, val_acc, val_preds, val_labels = self.validate()
+            # Validate
+            val_loss, val_acc, all_predicted, all_targets = self.validate()
             
-            # Actualizar scheduler
-            if self.config['scheduler'] == 'cosine':
-                self.scheduler.step()
-            else:
-                self.scheduler.step(val_acc)
+            # Scheduler step
+            self.scheduler.step()
             
-            # Guardar historial
-            self.train_losses.append(train_loss)
-            self.val_losses.append(val_loss)
-            self.val_accuracies.append(val_acc)
-            self.learning_rates.append(self.optimizer.param_groups[0]['lr'])
+            epoch_time = time.time() - epoch_start
             
-            # Mostrar resultados
-            print(f"🏋️  Train - Loss: {train_loss:.4f}, Acc: {train_acc:.2f}%")
-            print(f"✅ Val   - Loss: {val_loss:.4f}, Acc: {val_acc:.2f}%")
-            print(f"📈 LR: {self.optimizer.param_groups[0]['lr']:.2e}")
+            # Print stats
+            print(f"\n{'='*60}")
+            print(f"ÉPOCA {epoch+1}/{self.config['epochs']} - CIFF-Net RTX")
+            print(f"{'='*60}")
+            print(f"🔥 Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.2f}%")
+            print(f"📊 Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.2f}%")
+            print(f"⏱️  Tiempo época: {epoch_time:.1f}s")
+            print(f"💾 VRAM: {torch.cuda.memory_allocated()/1e9:.1f}GB / {torch.cuda.get_device_properties(0).total_memory/1e9:.1f}GB")
+            print(f"📈 LR actual: {self.optimizer.param_groups[0]['lr']:.2e}")
             
-            # Guardar mejor modelo
-            if val_acc > self.best_val_acc:
-                self.best_val_acc = val_acc
-                self.save_checkpoint(epoch, val_acc, 'best_ciff_net_phase1.pth')
-                print(f"🎉 ¡Nuevo mejor modelo CIFF-Net Fase 1! Acc: {val_acc:.2f}%")
+            # Save best model
+            if val_acc > best_acc:
+                best_acc = val_acc
                 patience_counter = 0
                 
-                # Visualizar atención cada vez que mejore
-                if epoch % 5 == 0:
-                    self.visualize_attention(sample_batch, f'attention_epoch_{epoch+1}.png')
+                # Guardar modelo
+                torch.save({
+                    'epoch': epoch,
+                    'model_state_dict': self.model.state_dict(),
+                    'optimizer_state_dict': self.optimizer.state_dict(),
+                    'scheduler_state_dict': self.scheduler.state_dict(),
+                    'best_acc': best_acc,
+                    'config': self.config
+                }, 'best_ciff_net_rtx8gb.pth')
+                
+                print(f"✅ Nuevo mejor modelo guardado! Acc: {best_acc:.2f}%")
+                
+                # Guardar métricas del mejor modelo
+                best_report = self.save_confusion_matrix(all_predicted, all_targets)
+                
             else:
                 patience_counter += 1
+                print(f"⏳ Paciencia: {patience_counter}/{self.config['early_stopping_patience']}")
             
             # Early stopping
             if patience_counter >= self.config['early_stopping_patience']:
-                print(f"⏹️  Early stopping en época {epoch+1}")
+                print(f"⏹️ Early stopping en época {epoch+1}")
                 break
-        
-        training_time = time.time() - start_time
-        print(f"\n⏱️  Tiempo total de entrenamiento: {training_time/3600:.2f} horas")
-        
-        # Mostrar resultados finales
-        self.show_final_results(val_preds, val_labels)
-        self.plot_training_history()
-        
-        # Visualización final de atención
-        self.visualize_attention(sample_batch, 'final_attention_maps.png')
-    
-    def save_checkpoint(self, epoch, val_acc, filename):
-        """Guardar checkpoint del modelo CIFF-Net"""
-        torch.save({
-            'epoch': epoch,
-            'model_state_dict': self.model.state_dict(),
-            'optimizer_state_dict': self.optimizer.state_dict(),
-            'scheduler_state_dict': self.scheduler.state_dict(),
-            'val_acc': val_acc,
-            'best_val_acc': self.best_val_acc,
-            'label_encoder': self.label_encoder,
-            'config': self.config,
-            'train_losses': self.train_losses,
-            'val_losses': self.val_losses,
-            'val_accuracies': self.val_accuracies,
-            'model_type': 'CIFF-Net-Phase1'
-        }, filename)
-    
-    def show_final_results(self, val_preds, val_labels):
-        """Mostrar resultados finales con métricas médicas"""
-        class_names = self.label_encoder.classes_
-        
-        print(f"\n{'='*80}")
-        print("📊 RESULTADOS FINALES - CIFF-Net Fase 1")
-        print(f"{'='*80}")
-        
-        # Reporte detallado
-        print("\n📋 Reporte de Clasificación:")
-        report = classification_report(
-            val_labels, val_preds, 
-            target_names=class_names, 
-            digits=4
-        )
-        print(report)
-        
-        # Matriz de confusión mejorada
-        cm = confusion_matrix(val_labels, val_preds)
-        
-        plt.figure(figsize=(12, 10))
-        sns.heatmap(
-            cm, annot=True, fmt='d', cmap='Blues',
-            xticklabels=class_names, yticklabels=class_names,
-            cbar_kws={'label': 'Número de muestras'}
-        )
-        plt.title('Matriz de Confusión - CIFF-Net Fase 1 con MKSA', 
-                 fontsize=16, fontweight='bold')
-        plt.ylabel('Etiqueta Verdadera', fontsize=12)
-        plt.xlabel('Etiqueta Predicha', fontsize=12)
-        plt.xticks(rotation=45)
-        plt.yticks(rotation=0)
-        plt.tight_layout()
-        plt.savefig('confusion_matrix_ciff_phase1.png', dpi=300, bbox_inches='tight')
-        plt.show()
-        
-        # Métricas por clase
-        class_accuracies = cm.diagonal() / cm.sum(axis=1)
-        print(f"\n🎯 Accuracy por clase:")
-        for i, (class_name, acc) in enumerate(zip(class_names, class_accuracies)):
-            print(f"  {class_name}: {acc:.4f} ({acc*100:.2f}%)")
             
-        print(f"\n🏆 Mejor accuracy alcanzada: {self.best_val_acc:.2f}%")
-    
-    def plot_training_history(self):
-        """Graficar historial de entrenamiento específico para CIFF-Net"""
-        fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(15, 12))
+            # Guardar plots cada 5 épocas
+            if (epoch + 1) % 5 == 0:
+                self.save_plots()
         
-        # Loss
-        ax1.plot(self.train_losses, label='Train Loss', color='blue', alpha=0.8)
-        ax1.plot(self.val_losses, label='Val Loss', color='red', alpha=0.8)
-        ax1.set_title('Pérdida - CIFF-Net Fase 1', fontweight='bold')
-        ax1.set_xlabel('Época')
-        ax1.set_ylabel('Loss')
-        ax1.legend()
-        ax1.grid(True, alpha=0.3)
+        total_time = time.time() - start_time
         
-        # Accuracy
-        ax2.plot(self.val_accuracies, label='Val Accuracy', color='green', linewidth=2)
-        ax2.axhline(y=max(self.val_accuracies), color='red', linestyle='--', alpha=0.7, 
-                   label=f'Best: {max(self.val_accuracies):.2f}%')
-        ax2.set_title('Precisión - CIFF-Net Fase 1', fontweight='bold')
-        ax2.set_xlabel('Época')
-        ax2.set_ylabel('Accuracy (%)')
-        ax2.legend()
-        ax2.grid(True, alpha=0.3)
+        # Guardar plots finales
+        self.save_plots()
         
-        # Learning Rate
-        ax3.plot(self.learning_rates, color='orange', linewidth=2)
-        ax3.set_title('Learning Rate Schedule', fontweight='bold')
-        ax3.set_xlabel('Época')
-        ax3.set_ylabel('Learning Rate')
-        ax3.set_yscale('log')
-        ax3.grid(True, alpha=0.3)
-        
-        # Convergencia
-        smoothed_acc = np.convolve(self.val_accuracies, np.ones(5)/5, mode='valid')
-        ax4.plot(range(len(smoothed_acc)), smoothed_acc, color='purple', linewidth=2)
-        ax4.set_title('Convergencia (Suavizada)', fontweight='bold')
-        ax4.set_xlabel('Época')
-        ax4.set_ylabel('Accuracy (%)')
-        ax4.grid(True, alpha=0.3)
-        
-        plt.suptitle('CIFF-Net Fase 1 - Historial de Entrenamiento', fontsize=16, fontweight='bold')
-        plt.tight_layout()
-        plt.savefig('training_history_ciff_phase1.png', dpi=300, bbox_inches='tight')
-        plt.show()
+        print(f"\n🎉 Entrenamiento completado!")
+        print(f"⏱️  Tiempo total: {total_time/3600:.2f} horas")
+        print(f"🏆 Mejor accuracy: {best_acc:.2f}%")
+        print(f"📁 Archivos generados:")
+        print(f"   - best_ciff_net_rtx8gb.pth")
+        print(f"   - training_history_rtx8gb.png")
+        print(f"   - confusion_matrix_rtx8gb.png") 
+        print(f"   - classification_report_rtx8gb.csv")
 
 def main():
-    # Configuración
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"🔧 Usando dispositivo: {device}")
+    # Limpiar cache CUDA al inicio
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        # Configurar para evitar fragmentación
+        import os
+        os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
     
-    # Configuración específica para CIFF-Net Fase 1
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f"🔧 Dispositivo: {device}")
+    
+    if torch.cuda.is_available():
+        print(f"🔥 GPU: {torch.cuda.get_device_name(0)}")
+        print(f"💾 VRAM total: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
+    
+    # Configuración optimizada para RTX 8GB
     training_config = {
-        'learning_rate': 1e-4,
+        'learning_rate': 2e-4,
         'weight_decay': 1e-4,
-        'loss_type': 'focal',  # Ideal para datos médicos desbalanceados
+        'loss_type': 'focal',
         'scheduler': 'cosine',
-        'epochs': 50,
-        'early_stopping_patience': 12,
+        'epochs': 40,
+        'early_stopping_patience': 10,
         'gradient_clipping': 1.0,
-        'warmup_epochs': 5
+        'warmup_epochs': 3,
+        'mixed_precision': True
     }
     
-    # Cargar datos con rutas corregidas
-    csv_file = "datasetHam10000/HAM10000_metadata.csv"
-    image_folders = ["datasetHam10000/HAM10000_images_part_1", "datasetHam10000/HAM10000_images_part_2"]  # Cambio aquí
+    # Batch size para RTX 8GB
+    batch_size = 16
     
-    print("📂 Cargando dataset HAM10000 para CIFF-Net...")
+    # Cargar datos
+    csv_file = "datasetHam10000/HAM10000_metadata.csv"
+    image_folders = ["datasetHam10000/HAM10000_images_part_1", "datasetHam10000/HAM10000_images_part_2"]
+    
+    print(f"📂 Cargando dataset HAM10000 para CIFF-Net...")
     train_loader, val_loader, label_encoder = create_data_loaders(
-        csv_file, image_folders, batch_size=24  # Reduce si hay problemas de VRAM
+        csv_file, image_folders, batch_size=batch_size
     )
     
-    # Crear modelo CIFF-Net Fase 1
+    # Crear modelo
     num_classes = len(label_encoder.classes_)
-    print(f"🧠 Creando CIFF-Net Fase 1 con MKSA para {num_classes} clases...")
+    print(f"🧠 Creando CIFF-Net RTX 8GB para {num_classes} clases...")
     
-    model = create_ciff_net_phase1(
-        num_classes=num_classes, 
-        backbone='efficientnet_b0',  # Cambiar a 'efficientnet_b3' si tienes más VRAM
+    model = create_ciff_net_rtx8gb(
+        num_classes=num_classes,
+        backbone='efficientnet_b0',
         pretrained=True
     )
     
     # Resumen del modelo
-    from model import model_summary
-    model_summary(model)
+    rtx8gb_model_summary(model)
     
-    # Entrenar
-    trainer = CIFFNetPhase1Trainer(
-        model, train_loader, val_loader, 
+    # Entrenar con AMP
+    trainer = CIFFNetPhase1TrainerAMP(
+        model, train_loader, val_loader,
         label_encoder, device, training_config
     )
     
     trainer.train()
-    
-    print("\n🎉 ¡Entrenamiento de CIFF-Net Fase 1 completado!")
-    print("📁 Archivos generados:")
-    print("  - best_ciff_net_phase1.pth (modelo entrenado)")
-    print("  - confusion_matrix_ciff_phase1.png")
-    print("  - training_history_ciff_phase1.png")
-    print("  - attention_maps visualizaciones")
 
 if __name__ == "__main__":
     main()
