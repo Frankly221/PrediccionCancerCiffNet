@@ -1,27 +1,16 @@
-¡Perfecto! Ahora sí estás aprovechando casi toda la GPU:
-
-GPU-Util al 96 %
-
-VRAM en ~2.6 GiB de los 8 GiB
-
-Temperatura en 86 °C
-
-Poder en ~94 W/104 W
-
-Eso significa que tu pipeline ya está saturando la tarjeta: las transferencias y el cómputo están ejecutándose en la RTX 3070 Ti, no en la CPU.
-
-Qué has ganado
-Más throughput: la GPU trabajando al 96 % acelera cada batch.
-
-Menos espera: la CPU ya no está quedándose atrás entregando datos.
-
-Mayor estabilidad: al usar tanto VRAM y saturar la GPU, las fluctuaciones de rendimiento deberían minimizarse.
-
-Próximos ajustes opcionales
-Aumentar batch size aún más (p. ej. de 64→128) hasta usar unos 6–7 GiB y mantener ese ~96 % de GPU-Util.
-
-Incrementar resolución (p. ej. 256×256) o cambiar a EfficientNet-B3/B7: ahora tienes cabeza de GPU para modelos más grandes.
-
-Mixed precision (AMP) si aún no lo tienes activado, para exprimir más velocidad y bajar uso de VRAM.
-
-CuDNN benchmark activo (torch.backends.cudnn.benchmark = True) para optimizar kernels.
+📁 Cargando dataset HAM10000...
+Traceback (most recent call last):
+  File "C:\Users\alexi\Desktop\ModelosIA\PrediccionCancerCiffNet\main_ciffnet_complete.py", line 739, in <module>
+    main()
+    ~~~~^^
+  File "C:\Users\alexi\Desktop\ModelosIA\PrediccionCancerCiffNet\main_ciffnet_complete.py", line 566, in main  
+    train_loader, val_loader, label_encoder, class_weights = create_improved_data_loaders(
+                                                             ~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+        csv_file=csv_file,
+        ^^^^^^^^^^^^^^^^^^
+    ...<3 lines>...
+        pin_memory=config['pin_memory']
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+TypeError: create_improved_data_loaders() got an unexpected keyword argument 'num_workers'
