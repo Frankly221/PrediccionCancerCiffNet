@@ -1,0 +1,35 @@
+======================================================================
+ÉPOCA 1/50 - CIFF-Net Fase 1
+======================================================================
+CIFF Phase1 Epoch 1/50:   0%|                                               | 0/334 [00:34<?, ?it/s] 
+Traceback (most recent call last):
+  File "C:\Users\alexi\Desktop\ModelosIA\PrediccionCancerCiffNet\train.py", line 471, in <module>    
+    main()
+    ~~~~^^
+  File "C:\Users\alexi\Desktop\ModelosIA\PrediccionCancerCiffNet\train.py", line 461, in main        
+    trainer.train()
+    ~~~~~~~~~~~~~^^
+  File "C:\Users\alexi\Desktop\ModelosIA\PrediccionCancerCiffNet\train.py", line 260, in train       
+    train_loss, train_acc = self.train_epoch(epoch)
+                            ~~~~~~~~~~~~~~~~^^^^^^^
+  File "C:\Users\alexi\Desktop\ModelosIA\PrediccionCancerCiffNet\train.py", line 161, in train_epoch 
+    outputs = self.model(inputs)
+  File "C:\Users\alexi\AppData\Local\Programs\Python\Python313\Lib\site-packages\torch\nn\modules\module.py", line 1751, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "C:\Users\alexi\AppData\Local\Programs\Python\Python313\Lib\site-packages\torch\nn\modules\module.py", line 1762, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "C:\Users\alexi\Desktop\ModelosIA\PrediccionCancerCiffNet\model.py", line 180, in forward     
+    attended = self.mksa_modules[i](feature_map)
+  File "C:\Users\alexi\AppData\Local\Programs\Python\Python313\Lib\site-packages\torch\nn\modules\module.py", line 1751, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "C:\Users\alexi\AppData\Local\Programs\Python\Python313\Lib\site-packages\torch\nn\modules\module.py", line 1762, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "C:\Users\alexi\Desktop\ModelosIA\PrediccionCancerCiffNet\model.py", line 56, in forward      
+    attention_weights = self.softmax(attention_scores / math.sqrt(self.reduced_channels))
+                                     ~~~~~~~~~~~~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 14.07 GiB. GPU 0 has a total capacity of 8.00 GiB of which 0 bytes is free. Of the allocated memory 16.14 GiB is allocated by PyTorch, and 119.97 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)
+
+❌ Error en Fase 1: Command '['C:\\Users\\alexi\\AppData\\Local\\Programs\\Python\\Python313\\python.exe', 'train.py']' returned non-zero exit status 1.
+❌ Fase 1 falló. Deteniendo entrenamiento.
