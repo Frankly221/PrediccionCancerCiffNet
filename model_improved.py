@@ -116,21 +116,39 @@ class SEBlock(nn.Module):
         y = self.excitation(y).view(b, c, 1, 1)
         return x * y.expand_as(x)
 
-class ImprovedCrossStageAttention(nn.Module):
-    """Cross-stage attention mejorado"""
+class FixedImprovedCrossStageAttention(nn.Module):
+    """Cross-stage attention con dimensiones corregidas"""
     def __init__(self, feature_dims, output_dim=1024):
-        super(ImprovedCrossStageAttention, self).__init__()
+        super(FixedImprovedCrossStageAttention, self).__init__()
         self.feature_dims = feature_dims
         self.output_dim = output_dim
+        
+        print(f"🔧 Creando Cross-Stage Attention MEJORADO:")
+        print(f"   Feature dims: {feature_dims}")
+        print(f"   Output dim: {output_dim}")
+        
+        # Calcular dimensiones que sean divisibles por número de heads
+        num_levels = len(feature_dims)
+        base_proj_dim = output_dim // num_levels
+        
+        # Asegurar que sea divisible por 8 (número de heads)
+        proj_dim_per_level = (base_proj_dim // 8) * 8
+        if proj_dim_per_level < 8:
+            proj_dim_per_level = 8
+        
+        # Ajustar output_dim para que sea consistente
+        self.actual_output_dim = proj_dim_per_level * num_levels
+        
+        print(f"   Proj dim per level: {proj_dim_per_level}")
+        print(f"   Actual output dim: {self.actual_output_dim}")
+        print(f"   Heads: 8 (divisible: {proj_dim_per_level % 8 == 0})")
         
         # Proyecciones adaptativas
         self.projections = nn.ModuleList()
         self.se_blocks = nn.ModuleList()
         
-        proj_dim_per_level = output_dim // len(feature_dims)
-        
         for i, dim in enumerate(feature_dims):
-            # Proyección con más capacidad
+            # Proyección con dimensión fija
             self.projections.append(
                 nn.Sequential(
                     nn.AdaptiveAvgPool2d(1),
@@ -146,24 +164,27 @@ class ImprovedCrossStageAttention(nn.Module):
             
             # SE blocks para features espaciales
             self.se_blocks.append(SEBlock(dim))
+            print(f"   Level {i}: {dim} -> {proj_dim_per_level}")
         
-        # Attention entre niveles
+        # Attention entre niveles con dimensiones corregidas
         self.cross_attention = nn.MultiheadAttention(
-            embed_dim=proj_dim_per_level,
-            num_heads=8,
+            embed_dim=proj_dim_per_level,  # Debe ser divisible por num_heads
+            num_heads=8,                   # 8 heads
             dropout=0.1,
             batch_first=True
         )
         
         # Fusión final
         self.fusion = nn.Sequential(
-            nn.Linear(output_dim, output_dim * 2),
+            nn.Linear(self.actual_output_dim, output_dim),  # Ajustar a output deseado
             nn.ReLU(inplace=True),
             nn.Dropout(0.3),
-            nn.Linear(output_dim * 2, output_dim),
+            nn.Linear(output_dim, output_dim),
             nn.ReLU(inplace=True),
             nn.Dropout(0.2)
         )
+        
+        print(f"✅ Cross-Stage Attention MEJORADO creado!")
         
     def forward(self, feature_maps):
         # Aplicar SE blocks y proyecciones
@@ -184,8 +205,8 @@ class ImprovedCrossStageAttention(nn.Module):
         )
         
         # Concatenar y fusionar
-        concatenated = attended_features.flatten(1)  # [B, output_dim]
-        return self.fusion(concatenated)
+        concatenated = attended_features.flatten(1)  # [B, actual_output_dim]
+        return self.fusion(concatenated)  # [B, output_dim]
 
 class ImprovedCIFFNet(nn.Module):
     """CIFF-Net mejorado para mejor rendimiento"""
@@ -224,14 +245,14 @@ class ImprovedCIFFNet(nn.Module):
                 self.mksa_modules.append(SEBlock(channels))
                 print(f"   Level {i}: SE Block aplicado")
         
-        # Cross-stage attention mejorado
+        # Cross-stage attention mejorado con dimensiones corregidas
         feature_dims = [info[0] for info in self.feature_info]
-        self.cs_attention = ImprovedCrossStageAttention(feature_dims, output_dim=1024)
+        self.cs_attention = FixedImprovedCrossStageAttention(feature_dims, output_dim=1024)
         
         # Clasificador más sofisticado
         self.classifier = nn.Sequential(
             nn.Dropout(0.5),
-            nn.Linear(1024, 512),
+            nn.Linear(1024, 512),  # Input fijo en 1024
             nn.ReLU(inplace=True),
             nn.BatchNorm1d(512),
             nn.Dropout(0.4),
@@ -279,3 +300,53 @@ class ImprovedCIFFNet(nn.Module):
 def create_improved_ciff_net(num_classes=7, backbone='efficientnet_b1', pretrained=True):
     """Factory para modelo mejorado"""
     return ImprovedCIFFNet(num_classes, backbone, pretrained)
+
+def improved_model_summary(model, input_size=(1, 3, 224, 224)):
+    """Resumen del modelo mejorado"""
+    print("=" * 70)
+    print("🚀 CIFF-NET MEJORADO - DIMENSIONES CORREGIDAS")
+    print("=" * 70)
+    
+    total_params = sum(p.numel() for p in model.parameters())
+    print(f"Parámetros: {total_params:,}")
+    print(f"Memoria estimada: {total_params * 4 / 1e9:.2f} GB")
+    
+    if torch.cuda.is_available():
+        print(f"🔥 GPU: {torch.cuda.get_device_name(0)}")
+        print(f"💾 VRAM: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
+        
+        model = model.cuda()
+        model.eval()
+        
+        with torch.no_grad():
+            torch.cuda.empty_cache()
+            
+            x = torch.randn(*input_size).cuda()
+            memory_before = torch.cuda.memory_allocated() / 1e9
+            
+            print(f"🧪 Probando forward pass...")
+            try:
+                output = model(x)
+                print(f"✅ Forward exitoso!")
+                print(f"   Input: {tuple(x.shape)} -> Output: {tuple(output.shape)}")
+                
+                memory_after = torch.cuda.memory_allocated() / 1e9
+                memory_used = memory_after - memory_before
+                print(f"   VRAM utilizada: {memory_used:.2f} GB")
+                print(f"   VRAM libre: {8.0 - memory_after:.2f} GB")
+                
+            except Exception as e:
+                print(f"❌ Error en forward pass: {e}")
+                
+    print("=" * 70)
+
+if __name__ == "__main__":
+    print("🔥 Probando CIFF-Net MEJORADO...")
+    
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        
+        model = create_improved_ciff_net(num_classes=7)
+        improved_model_summary(model)
+    else:
+        print("❌ CUDA no disponible")
