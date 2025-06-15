@@ -90,27 +90,46 @@ class MemoryEfficientMKSA(nn.Module):
         
         return self.norm(attended + x)
 
-class CompactCrossStageAttention(nn.Module):
-    """Cross-stage attention compacto"""
+class FixedCrossStageAttention(nn.Module):
+    """Cross-stage attention con dimensiones fijas"""
     def __init__(self, feature_dims, output_dim=512):
-        super(CompactCrossStageAttention, self).__init__()
+        super(FixedCrossStageAttention, self).__init__()
         self.feature_dims = feature_dims
         self.output_dim = output_dim
         
-        # Proyecciones simples
+        print(f"🔧 Creando Cross-Stage Attention:")
+        print(f"   Feature dims: {feature_dims}")
+        print(f"   Output dim: {output_dim}")
+        
+        # Calcular dimensiones de proyección que sumen exactamente output_dim
+        total_features = len(feature_dims)
+        base_proj_dim = output_dim // total_features
+        
+        # Distribuir las dimensiones para que sumen exactamente output_dim
+        proj_dims = [base_proj_dim] * total_features
+        remainder = output_dim - sum(proj_dims)
+        
+        # Distribuir el resto en las primeras capas
+        for i in range(remainder):
+            proj_dims[i] += 1
+        
+        print(f"   Projection dims: {proj_dims} (suma: {sum(proj_dims)})")
+        
+        # Proyecciones con dimensiones exactas
         self.projections = nn.ModuleList()
-        for dim in feature_dims:
+        for i, (dim, proj_dim) in enumerate(zip(feature_dims, proj_dims)):
             self.projections.append(
                 nn.Sequential(
                     nn.AdaptiveAvgPool2d(1),
                     nn.Flatten(),
-                    nn.Linear(dim, output_dim // len(feature_dims)),
+                    nn.Linear(dim, proj_dim),
                     nn.ReLU(inplace=True),
                     nn.Dropout(0.2)
                 )
             )
+            print(f"   Level {i}: {dim} -> {proj_dim}")
         
-        # Fusión simple
+        # Fusión simple - input será exactamente output_dim
         self.fusion = nn.Sequential(
             nn.Linear(output_dim, output_dim),
             nn.ReLU(inplace=True),
@@ -122,19 +141,27 @@ class CompactCrossStageAttention(nn.Module):
         for i, feature_map in enumerate(feature_maps):
             feat = self.projections[i](feature_map)
             features.append(feat)
+            # Debug: verificar dimensiones
+            # print(f"Feature {i} shape: {feat.shape}")
         
         concatenated = torch.cat(features, dim=1)
+        # print(f"Concatenated shape: {concatenated.shape}")
+        
         return self.fusion(concatenated)
 
 class CIFFNetRTX8GB(nn.Module):
-    """CIFF-Net optimizado para 8GB VRAM"""
+    """CIFF-Net optimizado para 8GB VRAM con dimensiones fijas"""
     def __init__(self, num_classes=7, backbone='efficientnet_b0', pretrained=True):
         super(CIFFNetRTX8GB, self).__init__()
+        
+        print(f"🔥 Creando CIFF-Net RTX 8GB...")
+        print(f"   Backbone: {backbone}")
+        print(f"   Clases: {num_classes}")
         
         # Backbone más conservador
         self.backbone = timm.create_model(backbone, pretrained=pretrained, features_only=True)
         
-        # Feature info
+        # Feature info con verificación
         with torch.no_grad():
             dummy_input = torch.randn(1, 3, 224, 224)
             if torch.cuda.is_available():
@@ -154,6 +181,7 @@ class CIFFNetRTX8GB(nn.Module):
                 self.mksa_modules.append(
                     MemoryEfficientMKSA(channels, reduction=16, max_spatial_size=max_spatial)
                 )
+                print(f"   Level {i}: MKSA aplicado (max_spatial: {max_spatial})")
             else:
                 # Channel attention simple para otras capas
                 self.mksa_modules.append(
@@ -165,15 +193,18 @@ class CIFFNetRTX8GB(nn.Module):
                         nn.Sigmoid()
                     )
                 )
+                print(f"   Level {i}: Channel attention simple")
         
-        # Cross-stage attention compacto
+        # Cross-stage attention con dimensiones fijas
         feature_dims = [info[0] for info in self.feature_info]
-        self.cs_attention = CompactCrossStageAttention(feature_dims, output_dim=512)
+        cs_output_dim = 512  # Dimensión fija
+        self.cs_attention = FixedCrossStageAttention(feature_dims, output_dim=cs_output_dim)
         
-        # Clasificador simple
+        # Clasificador con dimensión de entrada exacta
+        print(f"🧠 Creando clasificador: {cs_output_dim} -> {num_classes}")
         self.classifier = nn.Sequential(
             nn.Dropout(0.4),
-            nn.Linear(512, 256),
+            nn.Linear(cs_output_dim, 256),  # Input exacto
             nn.ReLU(inplace=True),
             nn.BatchNorm1d(256),
             nn.Dropout(0.3),
@@ -186,6 +217,8 @@ class CIFFNetRTX8GB(nn.Module):
         
         # Gradient checkpointing para ahorrar memoria
         self.use_checkpoint = True
+        
+        print(f"✅ CIFF-Net RTX 8GB creado exitosamente!")
         
     def forward(self, x):
         # Extraer características con checkpointing
@@ -213,6 +246,9 @@ class CIFFNetRTX8GB(nn.Module):
         # Cross-stage attention
         fused_features = self.cs_attention(attended_features)
         
+        # Debug: verificar dimensión antes del clasificador
+        # print(f"Fused features shape: {fused_features.shape}")
+        
         return self.classifier(fused_features)
 
 def create_ciff_net_rtx8gb(num_classes=7, backbone='efficientnet_b0', pretrained=True):
@@ -220,7 +256,7 @@ def create_ciff_net_rtx8gb(num_classes=7, backbone='efficientnet_b0', pretrained
     return CIFFNetRTX8GB(num_classes, backbone, pretrained)
 
 def rtx8gb_model_summary(model, input_size=(1, 3, 224, 224)):
-    """Resumen RTX 8GB"""
+    """Resumen RTX 8GB con verificación de dimensiones"""
     print("=" * 60)
     print("🔥 CIFF-NET RTX 8GB MEMORY-OPTIMIZED")
     print("=" * 60)
@@ -243,15 +279,26 @@ def rtx8gb_model_summary(model, input_size=(1, 3, 224, 224)):
             x = torch.randn(*input_size).cuda()
             memory_before = torch.cuda.memory_allocated() / 1e9
             
-            output = model(x)
-            
-            memory_after = torch.cuda.memory_allocated() / 1e9
-            memory_used = memory_after - memory_before
-            
-            print(f"Input: {tuple(x.shape)} -> Output: {tuple(output.shape)}")
-            print(f"VRAM utilizada: {memory_used:.2f} GB")
-            print(f"VRAM libre: {8.0 - memory_after:.2f} GB")
-    
+            print(f"🧪 Probando forward pass...")
+            try:
+                output = model(x)
+                print(f"✅ Forward exitoso!")
+                print(f"   Input: {tuple(x.shape)} -> Output: {tuple(output.shape)}")
+                
+                memory_after = torch.cuda.memory_allocated() / 1e9
+                memory_used = memory_after - memory_before
+                print(f"   VRAM utilizada: {memory_used:.2f} GB")
+                print(f"   VRAM libre: {8.0 - memory_after:.2f} GB")
+                
+                # Test con batch más grande
+                print(f"🧪 Probando batch size 4...")
+                x_batch = torch.randn(4, 3, 224, 224).cuda()
+                output_batch = model(x_batch)
+                print(f"✅ Batch test exitoso: {tuple(x_batch.shape)} -> {tuple(output_batch.shape)}")
+                
+            except Exception as e:
+                print(f"❌ Error en forward pass: {e}")
+                
     print("=" * 60)
 
 if __name__ == "__main__":
