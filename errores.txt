@@ -1,36 +1,21 @@
-ights. This may be expected if model is being adapted.
-🔥 Feature dimensions: [(16, torch.Size([112, 112])), (24, torch.Size([56, 56])), (40, torch.Size([28, 28])), (112, torch.Size([14, 14])), (320, torch.Size([7, 7]))]
-   Level 0: SE Block aplicado
-   Level 1: SE Block aplicado
-   Level 2: SE Block aplicado
-   Level 3: ImprovedMKSA aplicado
-   Level 4: ImprovedMKSA aplicado
 Traceback (most recent call last):
   File "C:\Users\alexi\Desktop\ModelosIA\PrediccionCancerCiffNet\train_improved.py", line 501, in <module>
     main()
     ~~~~^^
-  File "C:\Users\alexi\Desktop\ModelosIA\PrediccionCancerCiffNet\train_improved.py", line 486, in main
-    model = create_improved_ciff_net(
-        num_classes=num_classes,
-        backbone='efficientnet_b1',  # Modelo más potente
-        pretrained=True
+  File "C:\Users\alexi\Desktop\ModelosIA\PrediccionCancerCiffNet\train_improved.py", line 493, in main
+    trainer = ImprovedCIFFNetTrainer(
+        model, train_loader, val_loader,
+        label_encoder, class_weights, device, training_config
     )
-  File "C:\Users\alexi\Desktop\ModelosIA\PrediccionCancerCiffNet\model_improved.py", line 281, in create_improved_ciff_net
-    return ImprovedCIFFNet(num_classes, backbone, pretrained)
-  File "C:\Users\alexi\Desktop\ModelosIA\PrediccionCancerCiffNet\model_improved.py", line 229, in __init__
-    self.cs_attention = ImprovedCrossStageAttention(feature_dims, output_dim=1024)
-                        ~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "C:\Users\alexi\Desktop\ModelosIA\PrediccionCancerCiffNet\model_improved.py", line 151, in __init__
-    self.cross_attention = nn.MultiheadAttention(
-                           ~~~~~~~~~~~~~~~~~~~~~^
-        embed_dim=proj_dim_per_level,
-        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-    ...<2 lines>...
-        batch_first=True
-        ^^^^^^^^^^^^^^^^
+  File "C:\Users\alexi\Desktop\ModelosIA\PrediccionCancerCiffNet\train_improved.py", line 45, in __init__
+    self.scheduler = ReduceLROnPlateau(
+                     ~~~~~~~~~~~~~~~~~^
+        self.optimizer,
+        ^^^^^^^^^^^^^^^
+    ...<4 lines>...
+        min_lr=1e-7
+        ^^^^^^^^^^^
     )
     ^
-  File "C:\Users\alexi\AppData\Local\Programs\Python\Python313\Lib\site-packages\torch\nn\modules\activation.py", line 1076, in __init__
-    self.head_dim * num_heads == self.embed_dim
-AssertionError: embed_dim must be divisible by num_heads
+TypeError: ReduceLROnPlateau.__init__() got an unexpected keyword argument 'verbose'
 ❌ Error en entrenamiento mejorado
