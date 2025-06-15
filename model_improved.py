@@ -355,3 +355,35 @@ if __name__ == "__main__":
         improved_model_summary(model)
     else:
         print("❌ CUDA no disponible")
+
+from phase1_feature_extraction import create_phase1_extractor
+
+def create_phase1_only_model(num_classes=7, backbone='efficientnet_b1'):
+    """
+    Crear modelo usando solo Fase 1 (para testing)
+    """
+    # Crear extractor Fase 1
+    phase1 = create_phase1_extractor(backbone, pretrained=True)
+    
+    # Clasificador simple para testing
+    classifier = nn.Sequential(
+        nn.Linear(256, 128),
+        nn.ReLU(inplace=True),
+        nn.Dropout(0.4),
+        nn.Linear(128, num_classes)
+    )
+    
+    # Modelo combinado
+    class Phase1TestModel(nn.Module):
+        def __init__(self, phase1, classifier):
+            super().__init__()
+            self.phase1 = phase1
+            self.classifier = classifier
+            
+        def forward(self, x):
+            phase1_output = self.phase1(x)
+            logits = self.classifier(phase1_output['fused_features'])
+            return logits
+    
+    model = Phase1TestModel(phase1, classifier)
+    return model
