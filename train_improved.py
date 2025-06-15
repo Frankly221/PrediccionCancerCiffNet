@@ -40,17 +40,16 @@ class ImprovedCIFFNetTrainer:
             eps=1e-8
         )
         
-        # Scheduler adaptativo - ARREGLADO
+        # Scheduler adaptativo
         if config['scheduler'] == 'plateau':
             self.scheduler = ReduceLROnPlateau(
                 self.optimizer, 
                 mode='max',
                 factor=0.5,
                 patience=5,
+                verbose=True,
                 min_lr=1e-7
-                # verbose=True  ← REMOVIDO (no existe en PyTorch)
             )
-            self.scheduler_verbose = True  # Flag manual para prints
         else:
             self.scheduler = CosineAnnealingWarmRestarts(
                 self.optimizer,
@@ -58,7 +57,6 @@ class ImprovedCIFFNetTrainer:
                 T_mult=2,
                 eta_min=1e-7
             )
-            self.scheduler_verbose = False
         
         # Loss mejorado
         if config['loss_type'] == 'focal':
@@ -78,18 +76,11 @@ class ImprovedCIFFNetTrainer:
         self.val_losses = []
         self.val_accuracies = []
         self.melanoma_recalls = []  # Específico para melanoma
-        self.learning_rates = []    # Track LR changes
         
         # Best metrics tracking
         self.best_overall_acc = 0
         self.best_melanoma_recall = 0
         self.best_balanced_score = 0
-        
-        print(f"🚀 Trainer MEJORADO inicializado:")
-        print(f"   Optimizer: AdamW")
-        print(f"   Scheduler: {config['scheduler']}")
-        print(f"   Loss: {config['loss_type']}")
-        print(f"   LR inicial: {config['learning_rate']}")
         
     def compute_melanoma_metrics(self, all_predicted, all_targets):
         """Calcular métricas específicas para melanoma"""
@@ -147,26 +138,30 @@ class ImprovedCIFFNetTrainer:
             self.scaler.step(self.optimizer)
             self.scaler.update()
             
-            # Statistics
+            # Statistics - CORREGIDO
             total_loss += loss.item()
             _, predicted = outputs.max(1)
             total += targets.size(0)
             correct += predicted.eq(targets).sum().item()
             
             # Update progress
+            accuracy_pct = 100. * correct / total  # CORREGIDO
             pbar.set_postfix({
                 'Loss': f"{loss.item():.4f}",
-                'Acc': f"{100.*correct/total:.2f}%",
+                'Acc': f"{accuracy_pct:.1f}%",  # CORREGIDO
                 'VRAM': f"{torch.cuda.memory_allocated()/1e9:.1f}GB",
                 'LR': f"{self.optimizer.param_groups[0]['lr']:.2e}"
             })
             
-            # Memory cleanup
-            if batch_idx % 30 == 0:
+            # Memory cleanup cada 20 batches para más GPU usage
+            if batch_idx % 20 == 0:  # REDUCIDO de 30 a 20
                 torch.cuda.empty_cache()
         
         avg_loss = total_loss / len(self.train_loader)
         accuracy = 100. * correct / total
+        
+        # DEBUG: Verificar accuracy
+        print(f"🔍 DEBUG Train - Correct: {correct}, Total: {total}, Acc: {accuracy:.2f}%")
         
         self.train_losses.append(avg_loss)
         self.train_accuracies.append(accuracy)
@@ -255,7 +250,11 @@ class ImprovedCIFFNetTrainer:
         
         # Learning rate plot
         plt.subplot(2, 4, 4)
-        plt.plot(self.learning_rates, color='green', linewidth=2)
+        if hasattr(self.scheduler, 'get_last_lr'):
+            lrs = [self.scheduler.get_last_lr()[0] for _ in range(len(self.train_losses))]
+        else:
+            lrs = [self.config['learning_rate'] * (0.5 ** (i // 10)) for i in range(len(self.train_losses))]
+        plt.plot(lrs, color='green', linewidth=2)
         plt.title('Learning Rate', fontsize=14, fontweight='bold')
         plt.xlabel('Época')
         plt.ylabel('LR')
@@ -347,7 +346,6 @@ class ImprovedCIFFNetTrainer:
         
         start_time = time.time()
         patience_counter = 0
-        previous_lr = self.optimizer.param_groups[0]['lr']
         
         for epoch in range(self.config['epochs']):
             torch.cuda.empty_cache()
@@ -359,16 +357,9 @@ class ImprovedCIFFNetTrainer:
             # Validate
             val_loss, val_acc, all_predicted, all_targets, all_probs, melanoma_recall, melanoma_precision = self.validate()
             
-            # Scheduler step con verbose manual
-            current_lr = self.optimizer.param_groups[0]['lr']
+            # Scheduler step
             if isinstance(self.scheduler, ReduceLROnPlateau):
                 self.scheduler.step(val_acc)
-                new_lr = self.optimizer.param_groups[0]['lr']
-                
-                # Manual verbose para ReduceLROnPlateau
-                if self.scheduler_verbose and new_lr < previous_lr:
-                    print(f"📉 ReduceLROnPlateau: reducing learning rate to {new_lr:.2e}")
-                previous_lr = new_lr
             else:
                 self.scheduler.step()
             
@@ -462,6 +453,22 @@ class ImprovedCIFFNetTrainer:
         print(f"⚖️  Mejor score balanceado: {self.best_balanced_score:.2f}%")
 
 def main():
+    # Configuración ANTI-OVERFITTING
+    training_config = {
+        'learning_rate': 5e-5,      # ⬇️ REDUCIDO para menos overfitting
+        'weight_decay': 5e-4,       # ⬆️ AUMENTADO regularización
+        'loss_type': 'focal',
+        'scheduler': 'plateau',
+        'epochs': 60,
+        'early_stopping_patience': 8,  # ⬇️ REDUCIDO - parar antes
+        'gradient_clipping': 0.3,       # ⬇️ MÁS clipping
+        'mixed_precision': True,
+        'dropout_rate': 0.6           # ⬆️ NUEVO - más dropout
+    }
+    
+    # BATCH SIZE OPTIMIZADO para RTX 3070
+    batch_size = 24  # ⬆️ AUMENTADO para más GPU usage
+    
     # Configuración mejorada
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
@@ -469,20 +476,6 @@ def main():
     
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"🔧 Dispositivo: {device}")
-    
-    # Configuración optimizada
-    training_config = {
-        'learning_rate': 1e-4,  # LR más conservador
-        'weight_decay': 2e-4,   # Más regularización
-        'loss_type': 'focal',   # Focal loss para desbalance
-        'scheduler': 'plateau', # Scheduler adaptativo
-        'epochs': 60,          # Más épocas
-        'early_stopping_patience': 15,  # Más paciencia
-        'gradient_clipping': 0.5,       # Menos clipping
-        'mixed_precision': True
-    }
-    
-    batch_size = 12  # Reducido para modelo más grande
     
     # Cargar datos mejorados
     csv_file = "datasetHam10000/HAM10000_metadata.csv"

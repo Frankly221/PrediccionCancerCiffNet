@@ -240,8 +240,8 @@ val_transform_improved = transforms.Compose([
     transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
 ])
 
-def create_improved_data_loaders(csv_file, image_folders, batch_size=12, test_size=0.2):
-    """Crear DataLoaders mejorados con balanceado"""
+def create_improved_data_loaders(csv_file, image_folders, batch_size=24, test_size=0.2):
+    """Crear DataLoaders optimizados para RTX 3070"""
     
     print(f"📂 Cargando datos mejorados desde: {csv_file}")
     
@@ -277,37 +277,43 @@ def create_improved_data_loaders(csv_file, image_folders, batch_size=12, test_si
         oversample_minorities=False
     )
     
-    # Workers optimizados
-    num_workers = min(multiprocessing.cpu_count(), 8)
+    # CONFIGURACIÓN MÁXIMA GPU USAGE
+    num_workers = 16        # ⬆️ MÁXIMO workers
+    pin_memory = True
+    prefetch_factor = 4     # ⬆️ MÁXIMO prefetch
+    persistent_workers = True
     
-    print(f"⚙️  Configuración mejorada:")
+    print(f"⚙️  Configuración MÁXIMA GPU RTX 3070:")
     print(f"   Batch size: {batch_size}")
     print(f"   Workers: {num_workers}")
-    print(f"   Oversample: Habilitado")
-    print(f"   Advanced augmentation: Habilitado")
+    print(f"   Prefetch factor: {prefetch_factor}")
+    print(f"   Pin memory: {pin_memory}")
+    print(f"   Persistent workers: {persistent_workers}")
     
-    # DataLoaders
+    # DataLoaders OPTIMIZADOS AL MÁXIMO
     train_loader = DataLoader(
-        train_data, 
-        batch_size=batch_size, 
+        train_data,
+        batch_size=batch_size,
         shuffle=True,
         num_workers=num_workers,
-        pin_memory=True,
-        persistent_workers=True if num_workers > 0 else False,
-        drop_last=True
+        pin_memory=pin_memory,
+        persistent_workers=persistent_workers,
+        prefetch_factor=prefetch_factor,
+        drop_last=True,
+        multiprocessing_context='spawn'  # ⬆️ NUEVO - mejor rendimiento Windows
     )
     
     val_loader = DataLoader(
-        val_data, 
-        batch_size=batch_size, 
+        val_data,
+        batch_size=batch_size,
         shuffle=False,
         num_workers=num_workers,
-        pin_memory=True,
-        persistent_workers=True if num_workers > 0 else False
+        pin_memory=pin_memory,
+        persistent_workers=persistent_workers,
+        prefetch_factor=prefetch_factor,
+        multiprocessing_context='spawn'  # ⬆️ NUEVO
     )
     
-    print(f"✅ DataLoaders mejorados creados!")
-    print(f"   Train batches: {len(train_loader)}")
-    print(f"   Val batches: {len(val_loader)}")
+    print(f"🚀 DataLoaders MÁXIMO RENDIMIENTO creados!")
     
     return train_loader, val_loader, train_data.label_encoder, train_data.get_class_weights_tensor()

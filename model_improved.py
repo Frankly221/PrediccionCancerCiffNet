@@ -210,7 +210,7 @@ class FixedImprovedCrossStageAttention(nn.Module):
 
 class ImprovedCIFFNet(nn.Module):
     """CIFF-Net mejorado para mejor rendimiento"""
-    def __init__(self, num_classes=7, backbone='efficientnet_b1', pretrained=True):
+    def __init__(self, num_classes=7, backbone='efficientnet_b1', pretrained=True, dropout_rate=0.6):
         super(ImprovedCIFFNet, self).__init__()
         
         print(f"🚀 Creando CIFF-Net MEJORADO...")
@@ -249,29 +249,34 @@ class ImprovedCIFFNet(nn.Module):
         feature_dims = [info[0] for info in self.feature_info]
         self.cs_attention = FixedImprovedCrossStageAttention(feature_dims, output_dim=1024)
         
-        # Clasificador más sofisticado
+        # Clasificador con MÁS REGULARIZACIÓN
         self.classifier = nn.Sequential(
-            nn.Dropout(0.5),
-            nn.Linear(1024, 512),  # Input fijo en 1024
+            nn.Dropout(dropout_rate),                # ⬆️ AUMENTADO dropout
+            nn.Linear(1024, 1024),
+            nn.ReLU(inplace=True),
+            nn.BatchNorm1d(1024),
+            nn.Dropout(dropout_rate * 0.8),          # ⬆️ Más dropout
+            nn.Linear(1024, 512),
             nn.ReLU(inplace=True),
             nn.BatchNorm1d(512),
-            nn.Dropout(0.4),
+            nn.Dropout(dropout_rate * 0.6),          # ⬆️ Dropout gradual
             nn.Linear(512, 256),
             nn.ReLU(inplace=True),
             nn.BatchNorm1d(256),
-            nn.Dropout(0.3),
+            nn.Dropout(dropout_rate * 0.4),          # ⬆️ Dropout gradual
             nn.Linear(256, 128),
             nn.ReLU(inplace=True),
             nn.BatchNorm1d(128),
-            nn.Dropout(0.2),
+            nn.Dropout(dropout_rate * 0.2),          # ⬆️ Dropout gradual
             nn.Linear(128, num_classes)
         )
         
-        # Gradient checkpointing
-        self.use_checkpoint = True
+        # Gradient checkpointing DESHABILITADO para 100% GPU
+        self.use_checkpoint = False
         
-        print(f"✅ CIFF-Net MEJORADO creado exitosamente!")
-        
+        print(f"✅ CIFF-Net ANTI-OVERFITTING creado!")
+        print(f"   Dropout rate: {dropout_rate}")
+
     def forward(self, x):
         # Extraer características
         if self.training and self.use_checkpoint:
@@ -297,9 +302,9 @@ class ImprovedCIFFNet(nn.Module):
         
         return self.classifier(fused_features)
 
-def create_improved_ciff_net(num_classes=7, backbone='efficientnet_b1', pretrained=True):
+def create_improved_ciff_net(num_classes=7, backbone='efficientnet_b1', pretrained=True, dropout_rate=0.6):
     """Factory para modelo mejorado"""
-    return ImprovedCIFFNet(num_classes, backbone, pretrained)
+    return ImprovedCIFFNet(num_classes, backbone, pretrained, dropout_rate)
 
 def improved_model_summary(model, input_size=(1, 3, 224, 224)):
     """Resumen del modelo mejorado"""
