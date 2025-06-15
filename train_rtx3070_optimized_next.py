@@ -12,7 +12,7 @@ import time
 import warnings
 warnings.filterwarnings('ignore')
 
-# CONFIGURACIÓN OPTIMIZADA RTX 3070 - FASE SIGUIENTE
+# CONFIGURACIÓN OPTIMIZADA RTX 3070 - FIXED
 import os
 os.environ['CUDA_LAUNCH_BLOCKING'] = '0'
 os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True,roundup_power2_divisions:16,garbage_collection_threshold:0.8'
@@ -29,16 +29,21 @@ torch.set_num_threads(20)
 torch.autograd.set_detect_anomaly(False)
 
 # Nuevas optimizaciones
-torch.backends.cuda.enable_math_sdp(True)
-torch.backends.cuda.enable_flash_sdp(True)
-torch.backends.cuda.enable_mem_efficient_sdp(True)
+try:
+    torch.backends.cuda.enable_math_sdp(True)
+    torch.backends.cuda.enable_flash_sdp(True)
+    torch.backends.cuda.enable_mem_efficient_sdp(True)
+    print("✅ CUDA optimizations enabled")
+except:
+    print("⚠️ Some CUDA optimizations not available")
 
+# USAR IMPORTS CORRECTOS
 from dataset_improved import create_improved_data_loaders
 from model_improved import create_improved_ciff_net, FocalLoss
 from tqdm import tqdm
 import torchvision.transforms as transforms
 
-def get_optimized_transforms():
+def get_optimized_transforms_256():
     """Transformaciones optimizadas 256x256 para RTX 3070"""
     return transforms.Compose([
         transforms.Resize((256, 256)),  # ⬆️ Resolución mayor
@@ -57,18 +62,10 @@ def get_optimized_transforms():
         transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
     ])
 
-def get_optimized_val_transforms():
-    """Validación 256x256"""
-    return transforms.Compose([
-        transforms.Resize((256, 256)),
-        transforms.ToTensor(),
-        transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
-    ])
-
 class RTX3070OptimizedTrainer:
-    """Trainer OPTIMIZADO RTX 3070 - Siguiente fase"""
+    """Trainer OPTIMIZADO RTX 3070 - FIXED VERSION"""
     def __init__(self, model, train_loader, val_loader, label_encoder, class_weights, device, config):
-        self.model = model.to(device, memory_format=torch.channels_last)
+        self.model = model.to(device)
         self.train_loader = train_loader
         self.val_loader = val_loader
         self.device = device
@@ -76,19 +73,19 @@ class RTX3070OptimizedTrainer:
         self.label_encoder = label_encoder
         self.class_weights = class_weights.to(device)
         
-        # CONFIGURACIÓN EXTREMA RTX 3070 - SIGUIENTE NIVEL
+        # CONFIGURACIÓN EXTREMA RTX 3070 - OPTIMIZADA
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
             torch.cuda.set_per_process_memory_fraction(0.97)  # 97% VRAM
             
             # Optimizaciones específicas
             torch.backends.cuda.cufft_plan_cache.max_size = 16
-            torch.backends.cuda.preferred_linalg_library('cusolver')
             
             print(f"✅ RTX 3070 OPTIMIZADO: VRAM 97%, resolución 256x256")
         
         # Convertir modelo a channels_last para mejor rendimiento
         self.model = self.model.to(memory_format=torch.channels_last)
+        print("✅ Channels last: ✅ ACTIVADO")
         
         # AMP EXTREMO OPTIMIZADO
         self.scaler = GradScaler(
@@ -106,8 +103,7 @@ class RTX3070OptimizedTrainer:
             betas=(0.9, 0.999),
             eps=1e-8,
             amsgrad=False,
-            foreach=True,
-            capturable=True  # ⬆️ CUDA graph compatibility
+            foreach=True if hasattr(torch.optim.AdamW, 'foreach') else False
         )
         
         # Scheduler COSINE más agresivo
@@ -167,12 +163,10 @@ class RTX3070OptimizedTrainer:
                 handle = pynvml.nvmlDeviceGetHandleByIndex(0)
                 temp = pynvml.nvmlDeviceGetTemperature(handle, pynvml.NVML_TEMPERATURE_GPU)
                 power_draw = pynvml.nvmlDeviceGetPowerUsage(handle) / 1000.0
-                fan_speed = pynvml.nvmlDeviceGetFanSpeed(handle)
                 pynvml.nvmlShutdown()
             except:
                 temp = 0
                 power_draw = 0
-                fan_speed = 0
             
             return {
                 'memory_allocated_gb': memory_allocated,
@@ -182,13 +176,12 @@ class RTX3070OptimizedTrainer:
                 'estimated_utilization': utilization,
                 'total_vram_gb': 8.0,
                 'temperature_c': temp,
-                'power_draw_w': power_draw,
-                'fan_speed_percent': fan_speed
+                'power_draw_w': power_draw
             }
         return {
             'memory_allocated_gb': 0, 'memory_reserved_gb': 0, 'memory_cached_gb': 0,
             'memory_percent': 0, 'estimated_utilization': 0, 'total_vram_gb': 8.0,
-            'temperature_c': 0, 'power_draw_w': 0, 'fan_speed_percent': 0
+            'temperature_c': 0, 'power_draw_w': 0
         }
     
     def compute_melanoma_metrics(self, all_predicted, all_targets):
@@ -216,7 +209,7 @@ class RTX3070OptimizedTrainer:
     
     def compute_balanced_score(self, accuracy, melanoma_recall):
         """Score balanceado optimizado"""
-        return 0.65 * accuracy + 0.35 * (melanoma_recall * 100)  # ⬆️ Más peso a accuracy general
+        return 0.65 * accuracy + 0.35 * (melanoma_recall * 100)
     
     def train_epoch_optimized(self, epoch):
         """Entrenamiento OPTIMIZADO RTX 3070 - Resolución 256x256"""
@@ -289,17 +282,18 @@ class RTX3070OptimizedTrainer:
             if batch_idx % 30 == 0:
                 current_gpu = gpu_stats['estimated_utilization']
                 current_vram = gpu_stats['memory_allocated_gb']
+                vram_vs_base = current_vram - 3.7
                 
                 if current_gpu >= 95 and current_vram >= 5:
                     status = "🎯 PERFECTO"
-                elif current_gpu >= 90 and current_vram >= 4:
+                elif current_gpu >= 90 and current_vram >= 4.5:
                     status = "✅ EXCELENTE"
                 elif current_gpu >= 85:
                     status = "🟡 BUENO"
                 else:
                     status = "⚠️ OPTIMIZABLE"
                 
-                print(f"\n📊 Batch {batch_idx}: {status} - GPU {current_gpu:.1f}% | VRAM {current_vram:.1f}GB | 256x256")
+                print(f"\n📊 Batch {batch_idx}: {status} - GPU {current_gpu:.1f}% | VRAM {current_vram:.1f}GB ({vram_vs_base:+.1f}GB vs base) | 256x256")
             
             # Limpieza optimizada
             if batch_idx % 75 == 0:
@@ -381,8 +375,8 @@ class RTX3070OptimizedTrainer:
     def train(self):
         print(f"🚀 INICIANDO ENTRENAMIENTO RTX 3070 OPTIMIZED...")
         print(f"🎯 OBJETIVO: 256x256 + mantener 96% GPU + >5GB VRAM")
-        print(f"⚙️  BASE: 96% GPU, 3.7GB VRAM, 102W")
-        print(f"📈 TARGET: 96%+ GPU, 5-6GB VRAM, accuracy +2-3%")
+        print(f"⚙️  BASE: 96% GPU, 3.7GB VRAM, 224x224")
+        print(f"📈 TARGET: 96%+ GPU, 5-6GB VRAM, 256x256, accuracy +2-3%")
         
         start_time = time.time()
         patience_counter = 0
@@ -404,6 +398,8 @@ class RTX3070OptimizedTrainer:
             import psutil
             ram = psutil.virtual_memory()
             
+            vram_improvement = gpu_stats['memory_allocated_gb'] - 3.7
+            
             print(f"\n{'='*140}")
             print(f"ÉPOCA {epoch+1}/{self.config['epochs']} - RTX 3070 OPTIMIZED (256x256)")
             print(f"{'='*140}")
@@ -415,14 +411,13 @@ class RTX3070OptimizedTrainer:
             print(f"🚀 RTX 3070 OPTIMIZED PERFORMANCE:")
             print(f"   GPU Utilization: {avg_gpu_util:.1f}% (Base: 96%)")
             print(f"   VRAM Usage: {gpu_stats['memory_allocated_gb']:.1f}GB/8GB ({gpu_stats['memory_percent']:.1f}%)")
-            print(f"   VRAM vs Base: {gpu_stats['memory_allocated_gb'] - 3.7:+.1f}GB")
+            print(f"   VRAM vs Base: {vram_improvement:+.1f}GB")
             print(f"   Resolution: 256x256 (vs 224x224)")
             print(f"   Temperature: {gpu_stats['temperature_c']:.0f}°C")
             print(f"   Power: {gpu_stats['power_draw_w']:.0f}W")
             print(f"📈 LR: {self.optimizer.param_groups[0]['lr']:.2e}")
             
             # Performance analysis
-            vram_improvement = gpu_stats['memory_allocated_gb'] - 3.7
             if vram_improvement >= 1.5:
                 print(f"🎯 VRAM EXCELENTE: +{vram_improvement:.1f}GB vs base")
             elif vram_improvement >= 0.5:
@@ -509,11 +504,12 @@ class RTX3070OptimizedTrainer:
         print(f"   Temperature: {avg_temp:.0f}°C")
 
 def main():
-    """Entrenamiento RTX 3070 OPTIMIZED - 256x256"""
-    print("🚀 ENTRENAMIENTO RTX 3070 OPTIMIZED")
+    """Entrenamiento RTX 3070 OPTIMIZED - 256x256 FIXED"""
+    print("🚀 ENTRENAMIENTO RTX 3070 OPTIMIZED - FIXED")
     print("🎯 OBJETIVO: 256x256 + mantener 96% GPU + >5GB VRAM")
     print("⚙️  BASE: 96% GPU, 3.7GB VRAM, 224x224")
     print("📈 TARGET: 96%+ GPU, 5-6GB VRAM, 256x256, accuracy +2-3%")
+    print("🔧 FIXED: Import correcto + channels_last")
     print("=" * 120)
     
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -543,55 +539,42 @@ def main():
     print(f"   Scheduler: Cosine annealing")
     print(f"   Channels last: ✅ ACTIVADO")
     
-    # Cargar datos con transformaciones optimizadas
+    # Cargar datos con función existente - FIXED
     csv_file = "datasetHam10000/HAM10000_metadata.csv"
     image_folders = ["datasetHam10000/HAM10000_images_part_1", "datasetHam10000/HAM10000_images_part_2"]
     
-    # USAR TRANSFORMACIONES OPTIMIZADAS
-    from dataset_improved import HAM10000Dataset
-    
-    # Modificar dataset para usar nuevas transformaciones
-    train_data = HAM10000Dataset(csv_file, image_folders, transform=get_optimized_transforms(), is_train=True)
-    
-    # Split
-    train_size = int(0.8 * len(train_data))
-    val_size = len(train_data) - train_size
-    train_dataset, val_dataset = torch.utils.data.random_split(train_data, [train_size, val_size])
-    
-    # DataLoaders optimizados
-    train_loader = torch.utils.data.DataLoader(
-        train_dataset,
+    # USAR create_improved_data_loaders DIRECTAMENTE
+    train_loader, val_loader, label_encoder, class_weights = create_improved_data_loaders(
+        csv_file, 
+        image_folders, 
         batch_size=batch_size,
-        shuffle=True,
-        num_workers=16,
-        pin_memory=True,
-        persistent_workers=True,
-        prefetch_factor=6,
-        drop_last=True
+        train_transforms=get_optimized_transforms_256(),  # ⬆️ Transformaciones optimizadas
+        val_transforms=transforms.Compose([
+            transforms.Resize((256, 256)),
+            transforms.ToTensor(),
+            transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+        ])
     )
     
-    val_loader = torch.utils.data.DataLoader(
-        val_dataset,
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=16,
-        pin_memory=True,
-        persistent_workers=True,
-        prefetch_factor=6
-    )
+    print(f"✅ DataLoaders creados con resolución 256x256")
+    print(f"   Train samples: {len(train_loader.dataset)}")
+    print(f"   Val samples: {len(val_loader.dataset)}")
+    print(f"   Classes: {len(label_encoder.classes_)}")
     
     # Crear modelo
-    num_classes = len(train_data.label_encoder.classes_)
+    num_classes = len(label_encoder.classes_)
     model = create_improved_ciff_net(
         num_classes=num_classes,
         backbone='efficientnet_b1',  # Mantener B1 para esta fase
         pretrained=True
     )
     
+    print(f"✅ Modelo EfficientNet-B1 creado para {num_classes} classes")
+    
     # Entrenar RTX 3070 OPTIMIZED
     trainer = RTX3070OptimizedTrainer(
         model, train_loader, val_loader,
-        train_data.label_encoder, train_data.get_class_weights_tensor(), device, training_config
+        label_encoder, class_weights, device, training_config
     )
     
     trainer.train()
