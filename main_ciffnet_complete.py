@@ -563,14 +563,13 @@ def main():
         "datasetHam10000/HAM10000_images_part_2"
     ]
     
+    # LÍNEA CORREGIDA:
     train_loader, val_loader, label_encoder, class_weights = create_improved_data_loaders(
         csv_file=csv_file,
         image_folders=image_folders,
-        batch_size=config['batch_size'],
-        num_workers=config['num_workers'],
-        pin_memory=config['pin_memory']
+        batch_size=config['batch_size']
     )
-    
+
     print(f"✅ Dataset cargado:")
     print(f"   Train batches: {len(train_loader)}")
     print(f"   Val batches: {len(val_loader)}")
