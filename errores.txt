@@ -1,36 +1,27 @@
-✅ Modelo compilado con torch.compile
-🚀 AGGRESSIVE RTX 3070 Trainer inicializado:
-   TARGET GPU: 95%+
-   TARGET VRAM: 7.8GB+
-   Batch size: 32
-   Workers: 16
-   Modelo compilado: ✅
-🚀 INICIANDO ENTRENAMIENTO RTX 3070 AGGRESSIVE...
-🎯 OBJETIVO: GPU 95%+ con BATCH SIZE MÁXIMO
-🔥 AGGRESSIVE RTX3070 Epoch 1/60:   0%|                                                                                         | 0/350 [00:00<?, ?it/s]W0615 14:44:38.450000 21580 site-packages\torch\_inductor\utils.py:1250] [0/0] Not enough SMs to use max_autotune_gemm mode
-🔥 AGGRESSIVE RTX3070 Epoch 1/60:   0%|                                                                                         | 0/350 [01:55<?, ?it/s]
-Traceback (most recent call last):
-  File "C:\Users\alexi\Desktop\ModelosIA\PrediccionCancerCiffNet\train_aggressive_rtx3070.py", line 764, in <module>
-    main()
-    ~~~~^^
-  File "C:\Users\alexi\Desktop\ModelosIA\PrediccionCancerCiffNet\train_aggressive_rtx3070.py", line 761, in main
-    trainer.train()
-    ~~~~~~~~~~~~~^^
-  File "C:\Users\alexi\Desktop\ModelosIA\PrediccionCancerCiffNet\train_aggressive_rtx3070.py", line 570, in train
-    train_loss, train_acc, throughput, gpu_stats, avg_gpu_util = self.train_epoch_aggressive(epoch)
-                                                                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^
-  File "C:\Users\alexi\Desktop\ModelosIA\PrediccionCancerCiffNet\train_aggressive_rtx3070.py", line 251, in train_epoch_aggressive
-    outputs = self.model(inputs)
-  File "C:\Users\alexi\AppData\Local\Programs\Python\Python313\Lib\site-packages\torch\nn\modules\module.py", line 1751, in _wrapped_call_impl
-    return self._call_impl(*args, **kwargs)
-           ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
-  File "C:\Users\alexi\AppData\Local\Programs\Python\Python313\Lib\site-packages\torch\nn\modules\module.py", line 1762, in _call_impl
-    return forward_call(*args, **kwargs)
-  File "C:\Users\alexi\AppData\Local\Programs\Python\Python313\Lib\site-packages\torch\_dynamo\eval_frame.py", line 663, in _fn
-    raise e.remove_dynamo_frames() from None  # see TORCHDYNAMO_VERBOSE=1
-    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "C:\Users\alexi\AppData\Local\Programs\Python\Python313\Lib\site-packages\torch\_inductor\scheduler.py", line 3957, in create_backend
-    raise TritonMissing(inspect.currentframe())
-torch._inductor.exc.TritonMissing: Cannot find a working triton installation. Either the package is not installed or it is too old. More information on installing Triton can be found at: https://github.com/triton-lang/triton
+¡Perfecto! Ahora sí estás aprovechando casi toda la GPU:
 
-Set TORCHDYNAMO_VERBOSE=1 for the internal stack trace (please do this especially if you're reporting a bug to PyTorch). For even more developer context, set TORCH_LOGS="+dynamo"
+GPU-Util al 96 %
+
+VRAM en ~2.6 GiB de los 8 GiB
+
+Temperatura en 86 °C
+
+Poder en ~94 W/104 W
+
+Eso significa que tu pipeline ya está saturando la tarjeta: las transferencias y el cómputo están ejecutándose en la RTX 3070 Ti, no en la CPU.
+
+Qué has ganado
+Más throughput: la GPU trabajando al 96 % acelera cada batch.
+
+Menos espera: la CPU ya no está quedándose atrás entregando datos.
+
+Mayor estabilidad: al usar tanto VRAM y saturar la GPU, las fluctuaciones de rendimiento deberían minimizarse.
+
+Próximos ajustes opcionales
+Aumentar batch size aún más (p. ej. de 64→128) hasta usar unos 6–7 GiB y mantener ese ~96 % de GPU-Util.
+
+Incrementar resolución (p. ej. 256×256) o cambiar a EfficientNet-B3/B7: ahora tienes cabeza de GPU para modelos más grandes.
+
+Mixed precision (AMP) si aún no lo tienes activado, para exprimir más velocidad y bajar uso de VRAM.
+
+CuDNN benchmark activo (torch.backends.cudnn.benchmark = True) para optimizar kernels.
