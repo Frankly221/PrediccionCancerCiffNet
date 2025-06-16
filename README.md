@@ -5,6 +5,12 @@
 [![CUDA](https://img.shields.io/badge/CUDA-11.8+-green.svg)](https://developer.nvidia.com/cuda-toolkit)
 [![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
+Data : 
+https://dataverse.harvard.edu/dataset.xhtml?persistentId=doi:10.7910/DVN/DBW86T&version=3.0
+
+Arquitectura CIFF-NET : 
+https://www.sciencedirect.com/science/article/pii/S1746809423011060
+
 ## 🎯 Overview
 
 CiffNet Complete is an advanced deep learning framework for automated skin cancer classification, implementing a novel **three-phase architecture** with cliff detection and uncertainty estimation. The model achieves **87.72% accuracy** on the HAM10000 dataset, outperforming baseline methods by significant margins.
