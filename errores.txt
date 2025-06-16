@@ -1,62 +1,48 @@
-✅ CiffNetPhase3Loss inicializado:
-   Alpha (classification): 1.0
-   Beta (uncertainty): 0.3
-   Gamma (confidence): 0.2
-✅ CiffNet Complete creado:
-   Total parameters: 8,638,845
-   Trainable parameters: 8,638,845
-✅ Modelo creado y movido a cuda
+C:\Users\alexi\Desktop\ModelosIA\PrediccionCancerCiffNet>python rescue_results_fixed.py
+🚑 RESCATANDO RESULTADOS DEL ENTRENAMIENTO...
+📂 MODELOS ENCONTRADOS:
+   - ciffnet_best.pth
+   - ciffnet_epoch_10.pth
+   - ciffnet_epoch_20.pth
+   - ciffnet_epoch_30.pth
+   - ciffnet_epoch_40.pth
+   - ciffnet_epoch_50.pth
+   - ciffnet_epoch_60.pth
+   - ciffnet_epoch_70.pth
+   - ciffnet_epoch_80.pth
+   - ciffnet_epoch_90.pth
+✅ Usando mejor modelo: ciffnet_best.pth
 
-🏃 Iniciando entrenamiento...
-📊 CiffNet Metrics inicializado:
-   Classes: 7
-   Save dir: results
-   Class names: ['MEL', 'NV', 'BCC', 'AK', 'BKL', 'DF', 'VASC']
-✅ CiffNet Trainer inicializado:
-   Optimizer: AdamW
-   Scheduler: cosine
-   Mixed precision: True
-   Device: cuda
-🚀 Iniciando entrenamiento CiffNet Complete...
-   Epochs: 100
-   Batch size: 32
-   Learning rate: 0.0001
-Epoch 1/100:   0%|                                                                                                              | 0/350 [01:08<?, ?it/s] 
+📊 INFORMACIÓN DEL MODELO ciffnet_best.pth:
+   Epoch guardado: 87
+   Best Val Accuracy: 0.8772
+   Best Val F1: 0.8738
+   Último Val Accuracy: 0.8772
+   Último Val F1: 0.8738275151908812
+
+🏆 MEJOR RENDIMIENTO EN LA HISTORIA:
+   Mejor epoch: 88
+   Mejor F1: 0.8738
+   Accuracy en mejor epoch: 0.8772
 Traceback (most recent call last):
-  File "C:\Users\alexi\Desktop\ModelosIA\PrediccionCancerCiffNet\main_ciffnet_complete.py", line 735, in <module>
-    main()
-    ~~~~^^
-  File "C:\Users\alexi\Desktop\ModelosIA\PrediccionCancerCiffNet\main_ciffnet_complete.py", line 608, in main
-    history = trainer.train()
-  File "C:\Users\alexi\Desktop\ModelosIA\PrediccionCancerCiffNet\main_ciffnet_complete.py", line 421, in train
-    train_loss, train_acc, train_f1 = self.train_epoch(epoch)
-                                      ~~~~~~~~~~~~~~~~^^^^^^^
-  File "C:\Users\alexi\Desktop\ModelosIA\PrediccionCancerCiffNet\main_ciffnet_complete.py", line 246, in train_epoch
-    outputs = self.model(images, targets, return_all=True)
-  File "C:\Users\alexi\AppData\Local\Programs\Python\Python313\Lib\site-packages\torch\nn\modules\module.py", line 1751, in _wrapped_call_impl
-    return self._call_impl(*args, **kwargs)
-           ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
-  File "C:\Users\alexi\AppData\Local\Programs\Python\Python313\Lib\site-packages\torch\nn\modules\module.py", line 1762, in _call_impl
-    return forward_call(*args, **kwargs)
-  File "C:\Users\alexi\Desktop\ModelosIA\PrediccionCancerCiffNet\main_ciffnet_complete.py", line 98, in forward
-    phase3_outputs = self.phase3(phase2_outputs, return_all=return_all)
-  File "C:\Users\alexi\AppData\Local\Programs\Python\Python313\Lib\site-packages\torch\nn\modules\module.py", line 1751, in _wrapped_call_impl
-    return self._call_impl(*args, **kwargs)
-           ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
-  File "C:\Users\alexi\AppData\Local\Programs\Python\Python313\Lib\site-packages\torch\nn\modules\module.py", line 1762, in _call_impl
-    return forward_call(*args, **kwargs)
-  File "C:\Users\alexi\Desktop\ModelosIA\PrediccionCancerCiffNet\phase3_classification_complete.py", line 279, in forward
-    classification_outputs = self.cliff_aware_classifier(
-        refined_features,
-        cliff_scores,
-        training=self.training
-    )
-  File "C:\Users\alexi\AppData\Local\Programs\Python\Python313\Lib\site-packages\torch\nn\modules\module.py", line 1751, in _wrapped_call_impl
-    return self._call_impl(*args, **kwargs)
-           ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
-  File "C:\Users\alexi\AppData\Local\Programs\Python\Python313\Lib\site-packages\torch\nn\modules\module.py", line 1762, in _call_impl
-    return forward_call(*args, **kwargs)
-  File "C:\Users\alexi\Desktop\ModelosIA\PrediccionCancerCiffNet\phase3_classification_complete.py", line 77, in forward
-    final_logits[cliff_mask] = cliff_logits[cliff_mask]
-                               ~~~~~~~~~~~~^^^^^^^^^^^^
-IndexError: The shape of the mask [32, 1] at index 1 does not match the shape of the indexed tensor [32, 7] at index 1
+  File "C:\Users\alexi\Desktop\ModelosIA\PrediccionCancerCiffNet\rescue_results_fixed.py", line 301, in <module>
+    rescue_training_results()
+    ~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\alexi\Desktop\ModelosIA\PrediccionCancerCiffNet\rescue_results_fixed.py", line 114, in rescue_training_results
+    json.dump(summary, f, indent=4)
+    ~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\alexi\AppData\Local\Programs\Python\Python313\Lib\json\__init__.py", line 179, in dump
+    for chunk in iterable:
+                 ^^^^^^^^
+  File "C:\Users\alexi\AppData\Local\Programs\Python\Python313\Lib\json\encoder.py", line 432, in _iterencode
+    yield from _iterencode_dict(o, _current_indent_level)
+  File "C:\Users\alexi\AppData\Local\Programs\Python\Python313\Lib\json\encoder.py", line 406, in _iterencode_dict
+    yield from chunks
+  File "C:\Users\alexi\AppData\Local\Programs\Python\Python313\Lib\json\encoder.py", line 406, in _iterencode_dict
+    yield from chunks
+  File "C:\Users\alexi\AppData\Local\Programs\Python\Python313\Lib\json\encoder.py", line 439, in _iterencode
+    o = _default(o)
+  File "C:\Users\alexi\AppData\Local\Programs\Python\Python313\Lib\json\encoder.py", line 180, in default
+    raise TypeError(f'Object of type {o.__class__.__name__} '
+                    f'is not JSON serializable')
+TypeError: Object of type int64 is not JSON serializable
