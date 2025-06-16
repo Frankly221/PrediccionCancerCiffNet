@@ -1,48 +1,14 @@
-C:\Users\alexi\Desktop\ModelosIA\PrediccionCancerCiffNet>python rescue_results_fixed.py
-🚑 RESCATANDO RESULTADOS DEL ENTRENAMIENTO...
-📂 MODELOS ENCONTRADOS:
-   - ciffnet_best.pth
-   - ciffnet_epoch_10.pth
-   - ciffnet_epoch_20.pth
-   - ciffnet_epoch_30.pth
-   - ciffnet_epoch_40.pth
-   - ciffnet_epoch_50.pth
-   - ciffnet_epoch_60.pth
-   - ciffnet_epoch_70.pth
-   - ciffnet_epoch_80.pth
-   - ciffnet_epoch_90.pth
-✅ Usando mejor modelo: ciffnet_best.pth
+ Resumen guardado en: results/TRAINING_SUMMARY.json
 
-📊 INFORMACIÓN DEL MODELO ciffnet_best.pth:
-   Epoch guardado: 87
-   Best Val Accuracy: 0.8772
-   Best Val F1: 0.8738
-   Último Val Accuracy: 0.8772
-   Último Val F1: 0.8738275151908812
-
-🏆 MEJOR RENDIMIENTO EN LA HISTORIA:
-   Mejor epoch: 88
-   Mejor F1: 0.8738
-   Accuracy en mejor epoch: 0.8772
+📄 CREANDO REPORTE FINAL DE ÉXITO...
 Traceback (most recent call last):
-  File "C:\Users\alexi\Desktop\ModelosIA\PrediccionCancerCiffNet\rescue_results_fixed.py", line 301, in <module>
-    rescue_training_results()
-    ~~~~~~~~~~~~~~~~~~~~~~~^^
-  File "C:\Users\alexi\Desktop\ModelosIA\PrediccionCancerCiffNet\rescue_results_fixed.py", line 114, in rescue_training_results
-    json.dump(summary, f, indent=4)
-    ~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^
-  File "C:\Users\alexi\AppData\Local\Programs\Python\Python313\Lib\json\__init__.py", line 179, in dump
-    for chunk in iterable:
-                 ^^^^^^^^
-  File "C:\Users\alexi\AppData\Local\Programs\Python\Python313\Lib\json\encoder.py", line 432, in _iterencode
-    yield from _iterencode_dict(o, _current_indent_level)
-  File "C:\Users\alexi\AppData\Local\Programs\Python\Python313\Lib\json\encoder.py", line 406, in _iterencode_dict
-    yield from chunks
-  File "C:\Users\alexi\AppData\Local\Programs\Python\Python313\Lib\json\encoder.py", line 406, in _iterencode_dict
-    yield from chunks
-  File "C:\Users\alexi\AppData\Local\Programs\Python\Python313\Lib\json\encoder.py", line 439, in _iterencode
-    o = _default(o)
-  File "C:\Users\alexi\AppData\Local\Programs\Python\Python313\Lib\json\encoder.py", line 180, in default
-    raise TypeError(f'Object of type {o.__class__.__name__} '
-                    f'is not JSON serializable')
-TypeError: Object of type int64 is not JSON serializable
+  File "C:\Users\alexi\Desktop\ModelosIA\PrediccionCancerCiffNet\rescue_results_final.py", line 243, in <module>
+    create_final_success_report()
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\alexi\Desktop\ModelosIA\PrediccionCancerCiffNet\rescue_results_final.py", line 236, in create_final_success_report
+    f.write(report_content)
+    ~~~~~~~^^^^^^^^^^^^^^^^
+  File "C:\Users\alexi\AppData\Local\Programs\Python\Python313\Lib\encodings\cp1252.py", line 19, in encode
+    return codecs.charmap_encode(input,self.errors,encoding_table)[0]
+           ~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+UnicodeEncodeError: 'charmap' codec can't encode character '\U0001f3af' in position 2: character maps to <undefined>
