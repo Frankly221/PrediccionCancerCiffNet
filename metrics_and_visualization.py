@@ -297,180 +297,256 @@ class CiffNetMetrics:
         print(f"✅ Confusion matrix guardada: {save_path}")
         return cm
     
-    def plot_roc_curves(self, y_true, y_probs, save_name="roc_curves"):
+    def plot_roc_curves(self, y_true, y_probs):
         """
-        Plot ROC curves multiclass
+        Plot ROC curves para cada clase - CORREGIDO para manejar NaN
         """
-        if torch.is_tensor(y_true):
-            y_true = y_true.cpu().numpy()
-        if torch.is_tensor(y_probs):
-            y_probs = y_probs.cpu().numpy()
-        
-        # One-hot encode y_true
-        from sklearn.preprocessing import label_binarize
-        y_true_bin = label_binarize(y_true, classes=range(self.num_classes))
-        
-        plt.figure(figsize=(12, 10))
-        
-        # Plot ROC para cada clase
-        for i in range(self.num_classes):
-            fpr, tpr, _ = roc_curve(y_true_bin[:, i], y_probs[:, i])
-            roc_auc = auc(fpr, tpr)
+        try:
+            # ✅ VALIDACIÓN Y LIMPIEZA DE DATOS
+            print("🔍 Validando datos para ROC curves...")
             
-            plt.plot(fpr, tpr, 
-                    label=f'{self.class_names[i]} (AUC = {roc_auc:.3f})',
-                    linewidth=2)
-        
-        # Plot diagonal
-        plt.plot([0, 1], [0, 1], 'k--', alpha=0.5)
-        
-        plt.xlim([0.0, 1.0])
-        plt.ylim([0.0, 1.05])
-        plt.xlabel('False Positive Rate', fontsize=14)
-        plt.ylabel('True Positive Rate', fontsize=14)
-        plt.title('ROC Curves - Multi-Class', fontsize=16, fontweight='bold')
-        plt.legend(loc="lower right", fontsize=10)
-        plt.grid(alpha=0.3)
-        plt.tight_layout()
-        
-        # Guardar
-        save_path = f"{self.save_dir}/visualizations/{save_name}.png"
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        plt.close()
-        
-        print(f"✅ ROC curves guardadas: {save_path}")
-    
-    def plot_precision_recall_curves(self, y_true, y_probs, save_name="precision_recall"):
-        """
-        Plot Precision-Recall curves
-        """
-        if torch.is_tensor(y_true):
-            y_true = y_true.cpu().numpy()
-        if torch.is_tensor(y_probs):
-            y_probs = y_probs.cpu().numpy()
-        
-        from sklearn.preprocessing import label_binarize
-        y_true_bin = label_binarize(y_true, classes=range(self.num_classes))
-        
-        plt.figure(figsize=(12, 10))
-        
-        for i in range(self.num_classes):
-            precision, recall, _ = precision_recall_curve(y_true_bin[:, i], y_probs[:, i])
-            avg_precision = average_precision_score(y_true_bin[:, i], y_probs[:, i])
+            # Verificar y limpiar NaN en probabilidades
+            nan_mask = np.isnan(y_probs).any(axis=1)
+            if nan_mask.any():
+                print(f"⚠️ Encontrados {nan_mask.sum()} samples con NaN, eliminando...")
+                y_probs = y_probs[~nan_mask]
+                y_true = y_true[~nan_mask]
             
-            plt.plot(recall, precision,
-                    label=f'{self.class_names[i]} (AP = {avg_precision:.3f})',
-                    linewidth=2)
-        
-        plt.xlim([0.0, 1.0])
-        plt.ylim([0.0, 1.05])
-        plt.xlabel('Recall', fontsize=14)
-        plt.ylabel('Precision', fontsize=14)
-        plt.title('Precision-Recall Curves - Multi-Class', fontsize=16, fontweight='bold')
-        plt.legend(loc="lower left", fontsize=10)
-        plt.grid(alpha=0.3)
-        plt.tight_layout()
-        
-        save_path = f"{self.save_dir}/visualizations/{save_name}.png"
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        plt.close()
-        
-        print(f"✅ Precision-Recall curves guardadas: {save_path}")
-    
-    def plot_calibration_curve(self, y_true, y_probs, save_name="calibration"):
+            # Verificar que no hay infinitos
+            inf_mask = np.isinf(y_probs).any(axis=1)
+            if inf_mask.any():
+                print(f"⚠️ Encontrados {inf_mask.sum()} samples con infinitos, eliminando...")
+                y_probs = y_probs[~inf_mask]
+                y_true = y_true[~inf_mask]
+            
+            # Verificar que las probabilidades están en rango válido [0,1]
+            if y_probs.min() < 0 or y_probs.max() > 1:
+                print(f"⚠️ Probabilidades fuera de rango [0,1], normalizando...")
+                # Aplicar softmax para normalizar
+                y_probs = np.exp(y_probs) / np.sum(np.exp(y_probs), axis=1, keepdims=True)
+            
+            # Verificar que tenemos datos suficientes
+            if len(y_true) < 10:
+                print(f"❌ Datos insuficientes después de limpieza ({len(y_true)} samples)")
+                return
+            
+            print(f"✅ Datos validados: {len(y_true)} samples, {y_probs.shape[1]} clases")
+            
+            # Binarizar labels para ROC multiclase
+            from sklearn.preprocessing import label_binarize
+            y_true_bin = label_binarize(y_true, classes=range(self.num_classes))
+            
+            # Si solo hay una clase, label_binarize devuelve array 1D
+            if y_true_bin.ndim == 1:
+                y_true_bin = y_true_bin.reshape(-1, 1)
+            
+            # Crear figura
+            plt.figure(figsize=(12, 10))
+            colors = plt.cm.Set3(np.linspace(0, 1, self.num_classes))
+            
+            # ROC para cada clase
+            roc_auc = {}
+            all_fpr = []
+            all_tpr = []
+            
+            for i, (color, class_name) in enumerate(zip(colors, self.class_names)):
+                # ✅ VALIDACIÓN ADICIONAL POR CLASE
+                if i >= y_probs.shape[1]:
+                    print(f"⚠️ Saltando clase {i}: índice fuera de rango")
+                    continue
+                    
+                # Verificar que la clase tiene samples
+                if i >= y_true_bin.shape[1]:
+                    print(f"⚠️ Saltando clase {i}: no hay datos binarizados")
+                    continue
+                
+                class_y_true = y_true_bin[:, i]
+                class_y_probs = y_probs[:, i]
+                
+                # Verificar NaN específicos de esta clase
+                class_nan_mask = np.isnan(class_y_probs) | np.isnan(class_y_true)
+                if class_nan_mask.any():
+                    print(f"⚠️ Clase {class_name}: {class_nan_mask.sum()} valores NaN, limpiando...")
+                    class_y_true = class_y_true[~class_nan_mask]
+                    class_y_probs = class_y_probs[~class_nan_mask]
+                
+                # Verificar que hay al menos dos clases (0 y 1) en y_true
+                if len(np.unique(class_y_true)) < 2:
+                    print(f"⚠️ Clase {class_name}: solo una clase presente, saltando ROC")
+                    continue
+                
+                try:
+                    # ✅ CÁLCULO SEGURO DE ROC
+                    from sklearn.metrics import roc_curve, auc
+                    fpr, tpr, _ = roc_curve(class_y_true, class_y_probs)
+                    roc_auc[i] = auc(fpr, tpr)
+                    
+                    # Plot individual
+                    plt.plot(fpr, tpr, color=color, lw=2,
+                            label=f'{class_name} (AUC = {roc_auc[i]:.3f})')
+                    
+                    all_fpr.append(fpr)
+                    all_tpr.append(tpr)
+                    
+                except Exception as e:
+                    print(f"⚠️ Error en ROC para clase {class_name}: {e}")
+                    continue
+            
+            # ROC curve promedio (micro-average)
+            try:
+                from sklearn.metrics import roc_curve, auc
+                fpr_micro, tpr_micro, _ = roc_curve(y_true_bin.ravel(), y_probs.ravel())
+                roc_auc_micro = auc(fpr_micro, tpr_micro)
+                
+                plt.plot(fpr_micro, tpr_micro,
+                        color='deeppink', linestyle=':', linewidth=4,
+                        label=f'Micro-average (AUC = {roc_auc_micro:.3f})')
+            except Exception as e:
+                print(f"⚠️ Error en micro-average ROC: {e}")
+            
+            # Línea diagonal (random classifier)
+            plt.plot([0, 1], [0, 1], 'k--', lw=2, label='Random Classifier')
+            
+            # Configuración del plot
+            plt.xlim([0.0, 1.0])
+            plt.ylim([0.0, 1.05])
+            plt.xlabel('False Positive Rate', fontsize=12)
+            plt.ylabel('True Positive Rate', fontsize=12)
+            plt.title('Receiver Operating Characteristic (ROC) Curves', fontsize=14, fontweight='bold')
+            plt.legend(loc="lower right", fontsize=10)
+            plt.grid(True, alpha=0.3)
+            
+            # Guardar
+            save_path = f"{self.save_dir}/visualizations/roc_curves.png"
+            plt.savefig(save_path, dpi=300, bbox_inches='tight')
+            plt.close()
+            
+            print(f"✅ ROC curves guardadas: {save_path}")
+            
+            return roc_auc
+            
+        except Exception as e:
+            print(f"❌ Error crítico en plot_roc_curves: {e}")
+            print("🔧 Creando ROC curve simplificado...")
+            
+            # ✅ FALLBACK: ROC SIMPLIFICADO
+            try:
+                plt.figure(figsize=(8, 6))
+                plt.plot([0, 1], [0, 1], 'k--', lw=2, label='Random Classifier')
+                plt.xlim([0.0, 1.0])
+                plt.ylim([0.0, 1.05])
+                plt.xlabel('False Positive Rate')
+                plt.ylabel('True Positive Rate')
+                plt.title('ROC Curves (Error en datos - Fallback)')
+                plt.legend()
+                plt.grid(True, alpha=0.3)
+                
+                save_path = f"{self.save_dir}/visualizations/roc_curves_fallback.png"
+                plt.savefig(save_path, dpi=300, bbox_inches='tight')
+                plt.close()
+                
+                print(f"✅ ROC fallback guardado: {save_path}")
+                
+            except Exception as e2:
+                print(f"❌ Error en fallback ROC: {e2}")
+            
+            return {}
+
+    def plot_precision_recall_curves(self, y_true, y_probs):
         """
-        Plot reliability diagram (calibration curve)
+        Plot Precision-Recall curves - CORREGIDO para manejar NaN
         """
-        if torch.is_tensor(y_true):
-            y_true = y_true.cpu().numpy()
-        if torch.is_tensor(y_probs):
-            y_probs = y_probs.cpu().numpy()
-        
-        # Usar máxima probabilidad como confianza
-        confidences = np.max(y_probs, axis=1)
-        predictions = np.argmax(y_probs, axis=1)
-        accuracies = (y_true == predictions).astype(int)
-        
-        # Calcular calibration curve
-        fraction_of_positives, mean_predicted_value = calibration_curve(
-            accuracies, confidences, n_bins=10
-        )
-        
-        plt.figure(figsize=(10, 8))
-        
-        # Plot calibration curve
-        plt.plot(mean_predicted_value, fraction_of_positives, "s-", 
-                linewidth=2, label="CiffNet", markersize=8)
-        
-        # Plot perfect calibration
-        plt.plot([0, 1], [0, 1], "k:", label="Perfectly calibrated")
-        
-        plt.xlabel('Mean Predicted Probability', fontsize=14)
-        plt.ylabel('Fraction of Positives', fontsize=14)
-        plt.title('Reliability Diagram (Calibration Curve)', fontsize=16, fontweight='bold')
-        plt.legend(fontsize=12)
-        plt.grid(alpha=0.3)
-        plt.tight_layout()
-        
-        save_path = f"{self.save_dir}/visualizations/{save_name}.png"
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        plt.close()
-        
-        print(f"✅ Calibration curve guardada: {save_path}")
-    
-    def plot_training_curves(self, history, save_name="training_curves"):
-        """
-        Plot training curves (loss, accuracy, etc.)
-        """
-        fig, axes = plt.subplots(2, 2, figsize=(15, 12))
-        
-        # Loss curves
-        if 'train_loss' in history and 'val_loss' in history:
-            axes[0, 0].plot(history['train_loss'], label='Training Loss', linewidth=2)
-            axes[0, 0].plot(history['val_loss'], label='Validation Loss', linewidth=2)
-            axes[0, 0].set_title('Loss Curves', fontsize=14, fontweight='bold')
-            axes[0, 0].set_xlabel('Epoch')
-            axes[0, 0].set_ylabel('Loss')
-            axes[0, 0].legend()
-            axes[0, 0].grid(alpha=0.3)
-        
-        # Accuracy curves
-        if 'train_acc' in history and 'val_acc' in history:
-            axes[0, 1].plot(history['train_acc'], label='Training Accuracy', linewidth=2)
-            axes[0, 1].plot(history['val_acc'], label='Validation Accuracy', linewidth=2)
-            axes[0, 1].set_title('Accuracy Curves', fontsize=14, fontweight='bold')
-            axes[0, 1].set_xlabel('Epoch')
-            axes[0, 1].set_ylabel('Accuracy')
-            axes[0, 1].legend()
-            axes[0, 1].grid(alpha=0.3)
-        
-        # F1 curves
-        if 'train_f1' in history and 'val_f1' in history:
-            axes[1, 0].plot(history['train_f1'], label='Training F1', linewidth=2)
-            axes[1, 0].plot(history['val_f1'], label='Validation F1', linewidth=2)
-            axes[1, 0].set_title('F1 Score Curves', fontsize=14, fontweight='bold')
-            axes[1, 0].set_xlabel('Epoch')
-            axes[1, 0].set_ylabel('F1 Score')
-            axes[1, 0].legend()
-            axes[1, 0].grid(alpha=0.3)
-        
-        # Learning rate curve
-        if 'learning_rate' in history:
-            axes[1, 1].plot(history['learning_rate'], linewidth=2)
-            axes[1, 1].set_title('Learning Rate Schedule', fontsize=14, fontweight='bold')
-            axes[1, 1].set_xlabel('Epoch')
-            axes[1, 1].set_ylabel('Learning Rate')
-            axes[1, 1].set_yscale('log')
-            axes[1, 1].grid(alpha=0.3)
-        
-        plt.tight_layout()
-        
-        save_path = f"{self.save_dir}/visualizations/{save_name}.png"
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        plt.close()
-        
-        print(f"✅ Training curves guardadas: {save_path}")
-    
+        try:
+            # ✅ VALIDACIÓN Y LIMPIEZA DE DATOS (mismo proceso que ROC)
+            print("🔍 Validando datos para Precision-Recall curves...")
+            
+            # Limpiar NaN
+            nan_mask = np.isnan(y_probs).any(axis=1)
+            if nan_mask.any():
+                print(f"⚠️ Eliminando {nan_mask.sum()} samples con NaN...")
+                y_probs = y_probs[~nan_mask]
+                y_true = y_true[~nan_mask]
+            
+            # Limpiar infinitos
+            inf_mask = np.isinf(y_probs).any(axis=1)
+            if inf_mask.any():
+                print(f"⚠️ Eliminando {inf_mask.sum()} samples con infinitos...")
+                y_probs = y_probs[~inf_mask]
+                y_true = y_true[~inf_mask]
+            
+            # Normalizar probabilidades
+            if y_probs.min() < 0 or y_probs.max() > 1:
+                print(f"⚠️ Normalizando probabilidades...")
+                y_probs = np.exp(y_probs) / np.sum(np.exp(y_probs), axis=1, keepdims=True)
+            
+            if len(y_true) < 10:
+                print(f"❌ Datos insuficientes para PR curves ({len(y_true)} samples)")
+                return
+            
+            # Binarizar labels
+            from sklearn.preprocessing import label_binarize
+            y_true_bin = label_binarize(y_true, classes=range(self.num_classes))
+            if y_true_bin.ndim == 1:
+                y_true_bin = y_true_bin.reshape(-1, 1)
+            
+            # Crear figura
+            plt.figure(figsize=(12, 10))
+            colors = plt.cm.Set3(np.linspace(0, 1, self.num_classes))
+            
+            # PR curve para cada clase
+            pr_auc = {}
+            
+            for i, (color, class_name) in enumerate(zip(colors, self.class_names)):
+                if i >= y_probs.shape[1] or i >= y_true_bin.shape[1]:
+                    continue
+                    
+                class_y_true = y_true_bin[:, i]
+                class_y_probs = y_probs[:, i]
+                
+                # Limpiar NaN específicos
+                class_nan_mask = np.isnan(class_y_probs) | np.isnan(class_y_true)
+                if class_nan_mask.any():
+                    class_y_true = class_y_true[~class_nan_mask]
+                    class_y_probs = class_y_probs[~class_nan_mask]
+                
+                # Verificar variedad de clases
+                if len(np.unique(class_y_true)) < 2:
+                    print(f"⚠️ Clase {class_name}: solo una clase presente, saltando PR")
+                    continue
+                
+                try:
+                    from sklearn.metrics import precision_recall_curve, auc
+                    precision, recall, _ = precision_recall_curve(class_y_true, class_y_probs)
+                    pr_auc[i] = auc(recall, precision)
+                    
+                    plt.plot(recall, precision, color=color, lw=2,
+                            label=f'{class_name} (AUC = {pr_auc[i]:.3f})')
+                            
+                except Exception as e:
+                    print(f"⚠️ Error en PR para clase {class_name}: {e}")
+                    continue
+            
+            # Configuración del plot
+            plt.xlim([0.0, 1.0])
+            plt.ylim([0.0, 1.05])
+            plt.xlabel('Recall', fontsize=12)
+            plt.ylabel('Precision', fontsize=12)
+            plt.title('Precision-Recall Curves', fontsize=14, fontweight='bold')
+            plt.legend(loc="lower left", fontsize=10)
+            plt.grid(True, alpha=0.3)
+            
+            # Guardar
+            save_path = f"{self.save_dir}/visualizations/precision_recall_curves.png"
+            plt.savefig(save_path, dpi=300, bbox_inches='tight')
+            plt.close()
+            
+            print(f"✅ PR curves guardadas: {save_path}")
+            return pr_auc
+            
+        except Exception as e:
+            print(f"❌ Error en Precision-Recall curves: {e}")
+            return {}
+
     def save_metrics_json(self, metrics_dict, filename="detailed_metrics.json"):
         """
         Guardar métricas en JSON
@@ -526,7 +602,6 @@ def create_all_visualizations(metrics_calculator, y_true, y_pred, y_probs,
     if y_probs is not None:
         metrics_calculator.plot_roc_curves(y_true, y_probs)
         metrics_calculator.plot_precision_recall_curves(y_true, y_probs)
-        metrics_calculator.plot_calibration_curve(y_true, y_probs)
     
     # Training curves
     if history is not None:
