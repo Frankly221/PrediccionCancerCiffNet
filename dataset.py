@@ -1,286 +1,118 @@
 import torch
-import pandas as pd
-import os
-import numpy as np
 from torch.utils.data import Dataset, DataLoader
+import pandas as pd
+import numpy as np
 from PIL import Image
-import albumentations as A
-from albumentations.pytorch import ToTensorV2
+import os
 from sklearn.preprocessing import LabelEncoder
 from sklearn.model_selection import train_test_split
-import random
+import torchvision.transforms as transforms
+import multiprocessing
 
-class HAM10000DatasetPhase2(Dataset):
-    """Dataset modificado para CIFF-Net Fase 2 - Devuelve imagen principal + contextuales"""
-    def __init__(self, csv_file, image_folders, transform=None, num_context_images=3, phase='train'):
-        self.data = pd.read_csv(csv_file)
-        self.image_folders = image_folders
-        self.transform = transform
-        self.num_context_images = num_context_images  # M imágenes contextuales
-        self.phase = phase
-        
-        # Crear mapeo de imágenes
-        self.image_mapping = self._create_image_mapping()
-        
-        # Codificar etiquetas dx
-        self.label_encoder = LabelEncoder()
-        self.data['label'] = self.label_encoder.fit_transform(self.data['dx'])
-        
-        # Filtrar imágenes existentes
-        existing_images = self.data['image_id'].isin(self.image_mapping.keys())
-        self.data = self.data[existing_images].reset_index(drop=True)
-        
-        # Crear grupos por clase para selección contextual
-        self.class_groups = self._create_class_groups()
-        
-        # Crear grupos por metadatos (edad, sexo, localización) para contexto más rico
-        self.metadata_groups = self._create_metadata_groups()
-        
-        print(f"Dataset Fase 2 cargado: {len(self.data)} imágenes")
-        print(f"Imágenes contextuales por muestra: {num_context_images}")
-        print(f"Clases: {list(self.label_encoder.classes_)}")
-        
-    def _create_image_mapping(self):
-        image_map = {}
-        for folder in self.image_folders:
-            if os.path.exists(folder):
-                for image_file in os.listdir(folder):
-                    if image_file.lower().endswith(('.png', '.jpg', '.jpeg')):
-                        image_id = os.path.splitext(image_file)[0]
-                        image_map[image_id] = os.path.join(folder, image_file)
-        return image_map
-    
-    def _create_class_groups(self):
-        """Agrupar imágenes por clase"""
-        class_groups = {}
-        for idx, row in self.data.iterrows():
-            label = row['label']
-            if label not in class_groups:
-                class_groups[label] = []
-            class_groups[label].append(idx)
-        return class_groups
-    
-    def _create_metadata_groups(self):
-        """Agrupar por metadatos para contexto más diverso"""
-        metadata_groups = {
-            'age_sex': {},
-            'localization': {},
-            'dx_type': {}
-        }
-        
-        for idx, row in self.data.iterrows():
-            # Agrupar por edad y sexo
-            age_group = 'young' if row.get('age', 50) < 40 else 'old'
-            sex = row.get('sex', 'unknown')
-            age_sex_key = f"{age_group}_{sex}"
-            
-            if age_sex_key not in metadata_groups['age_sex']:
-                metadata_groups['age_sex'][age_sex_key] = []
-            metadata_groups['age_sex'][age_sex_key].append(idx)
-            
-            # Agrupar por localización
-            loc = row.get('localization', 'unknown')
-            if loc not in metadata_groups['localization']:
-                metadata_groups['localization'][loc] = []
-            metadata_groups['localization'][loc].append(idx)
-            
-            # Agrupar por tipo de diagnóstico
-            dx = row.get('dx', 'unknown')
-            if dx not in metadata_groups['dx_type']:
-                metadata_groups['dx_type'][dx] = []
-            metadata_groups['dx_type'][dx].append(idx)
-        
-        return metadata_groups
-    
-    def _select_context_images(self, main_idx, main_label):
-        """Seleccionar imágenes contextuales usando múltiples estrategias"""
-        context_indices = []
-        main_row = self.data.iloc[main_idx]
-        
-        # Estrategia 1: Misma clase (40% probabilidad)
-        if random.random() < 0.4 and len(self.class_groups[main_label]) > 1:
-            same_class_candidates = [i for i in self.class_groups[main_label] if i != main_idx]
-            if same_class_candidates:
-                context_indices.append(random.choice(same_class_candidates))
-        
-        # Estrategia 2: Misma localización (30% probabilidad)
-        if len(context_indices) < self.num_context_images and random.random() < 0.3:
-            main_loc = main_row.get('localization', 'unknown')
-            if main_loc in self.metadata_groups['localization']:
-                loc_candidates = [i for i in self.metadata_groups['localization'][main_loc] if i != main_idx]
-                if loc_candidates:
-                    context_indices.append(random.choice(loc_candidates))
-        
-        # Estrategia 3: Similar edad/sexo (20% probabilidad)
-        if len(context_indices) < self.num_context_images and random.random() < 0.2:
-            age_group = 'young' if main_row.get('age', 50) < 40 else 'old'
-            sex = main_row.get('sex', 'unknown')
-            age_sex_key = f"{age_group}_{sex}"
-            
-            if age_sex_key in self.metadata_groups['age_sex']:
-                demo_candidates = [i for i in self.metadata_groups['age_sex'][age_sex_key] if i != main_idx]
-                if demo_candidates:
-                    context_indices.append(random.choice(demo_candidates))
-        
-        # Estrategia 4: Clases diferentes para contraste (rellenar resto)
-        while len(context_indices) < self.num_context_images:
-            # Seleccionar de todas las clases excepto la principal
-            different_classes = [k for k in self.class_groups.keys() if k != main_label]
-            if different_classes:
-                diff_class = random.choice(different_classes)
-                diff_candidates = self.class_groups[diff_class]
-                if diff_candidates:
-                    context_indices.append(random.choice(diff_candidates))
-            else:
-                # Fallback: cualquier imagen diferente
-                all_indices = list(range(len(self.data)))
-                available = [i for i in all_indices if i != main_idx and i not in context_indices]
-                if available:
-                    context_indices.append(random.choice(available))
-                else:
-                    break
-        
-        # Si no hay suficientes, duplicar algunas
-        while len(context_indices) < self.num_context_images:
-            if context_indices:
-                context_indices.append(random.choice(context_indices))
-            else:
-                # Último recurso: usar la imagen principal
-                context_indices.append(main_idx)
-        
-        return context_indices[:self.num_context_images]
-    
-    def __len__(self):
-        return len(self.data)
-    
-    def __getitem__(self, idx):
-        main_row = self.data.iloc[idx]
-        main_image_id = main_row['image_id']
-        main_label = main_row['label']
-        
-        # Cargar imagen principal
-        main_image_path = self.image_mapping[main_image_id]
-        main_image = Image.open(main_image_path).convert('RGB')
-        
-        if self.transform:
-            main_image = self.transform(image=np.array(main_image))['image']
-        
-        # Durante entrenamiento, seleccionar imágenes contextuales
-        if self.phase == 'train':
-            context_indices = self._select_context_images(idx, main_label)
-            
-            context_images = []
-            context_labels = []
-            
-            for ctx_idx in context_indices:
-                ctx_row = self.data.iloc[ctx_idx]
-                ctx_image_id = ctx_row['image_id']
-                ctx_label = ctx_row['label']
-                
-                ctx_image_path = self.image_mapping[ctx_image_id]
-                ctx_image = Image.open(ctx_image_path).convert('RGB')
-                
-                if self.transform:
-                    ctx_image = self.transform(image=np.array(ctx_image))['image']
-                
-                context_images.append(ctx_image)
-                context_labels.append(ctx_label)
-            
-            # Retornar imagen principal + contextuales + metadatos
-            return {
-                'main_image': main_image,
-                'context_images': torch.stack(context_images),  # [M, C, H, W]
-                'main_label': torch.tensor(main_label, dtype=torch.long),
-                'context_labels': torch.tensor(context_labels, dtype=torch.long),
-                'main_idx': idx,
-                'context_indices': context_indices
-            }
-        else:
-            # Durante validación, solo imagen principal
-            return main_image, torch.tensor(main_label, dtype=torch.long)
-
-# Mantener dataset original para Fase 1
 class HAM10000Dataset(Dataset):
-    """Dataset original para Fase 1"""
+    """Dataset HAM10000 optimizado para RTX"""
     def __init__(self, csv_file, image_folders, transform=None):
-        self.data = pd.read_csv(csv_file)
+        self.df = pd.read_csv(csv_file)
         self.image_folders = image_folders
         self.transform = transform
         
-        # Crear mapeo de imágenes
-        self.image_mapping = self._create_image_mapping()
-        
-        # Codificar etiquetas dx
+        # Encode labels
         self.label_encoder = LabelEncoder()
-        self.data['label'] = self.label_encoder.fit_transform(self.data['dx'])
+        self.df['label'] = self.label_encoder.fit_transform(self.df['dx'])
         
-        # Filtrar imágenes existentes
-        existing_images = self.data['image_id'].isin(self.image_mapping.keys())
-        self.data = self.data[existing_images].reset_index(drop=True)
-        
-        print(f"Dataset cargado: {len(self.data)} imágenes")
-        print(f"Clases: {list(self.label_encoder.classes_)}")
-        
-    def _create_image_mapping(self):
-        image_map = {}
-        for folder in self.image_folders:
-            if os.path.exists(folder):
-                for image_file in os.listdir(folder):
-                    if image_file.lower().endswith(('.png', '.jpg', '.jpeg')):
-                        image_id = os.path.splitext(image_file)[0]
-                        image_map[image_id] = os.path.join(folder, image_file)
-        return image_map
+        print(f"📊 Clases encontradas: {list(self.label_encoder.classes_)}")
+        print(f"📈 Distribución de clases:")
+        for i, class_name in enumerate(self.label_encoder.classes_):
+            count = sum(self.df['label'] == i)
+            print(f"   {class_name}: {count} imágenes")
     
     def __len__(self):
-        return len(self.data)
+        return len(self.df)
     
     def __getitem__(self, idx):
-        row = self.data.iloc[idx]
+        row = self.df.iloc[idx]
         image_id = row['image_id']
         label = row['label']
         
-        image_path = self.image_mapping[image_id]
-        image = Image.open(image_path).convert('RGB')
+        # Buscar imagen en las carpetas
+        image_path = None
+        for folder in self.image_folders:
+            potential_path = os.path.join(folder, f"{image_id}.jpg")
+            if os.path.exists(potential_path):
+                image_path = potential_path
+                break
+        
+        if image_path is None:
+            raise FileNotFoundError(f"No se encontró la imagen: {image_id}.jpg")
+        
+        # Cargar imagen
+        try:
+            image = Image.open(image_path).convert('RGB')
+        except Exception as e:
+            print(f"Error cargando {image_path}: {e}")
+            # Imagen por defecto en caso de error
+            image = Image.new('RGB', (224, 224), (0, 0, 0))
         
         if self.transform:
-            image = self.transform(image=np.array(image))['image']
+            image = self.transform(image)
         
-        return image, torch.tensor(label, dtype=torch.long)
+        return image, label
 
-# Transformaciones corregidas para albumentations versión actual
-train_transform = A.Compose([
-    A.Resize(224, 224),
-    A.HorizontalFlip(p=0.5),  # Cambio: RandomHorizontalFlip -> HorizontalFlip
-    A.VerticalFlip(p=0.5),    # Cambio: RandomVerticalFlip -> VerticalFlip
-    A.RandomRotate90(p=0.5),
-    A.ShiftScaleRotate(shift_limit=0.1, scale_limit=0.1, rotate_limit=15, p=0.5),
-    A.RandomBrightnessContrast(brightness_limit=0.2, contrast_limit=0.2, p=0.5),
-    A.HueSaturationValue(hue_shift_limit=20, sat_shift_limit=30, val_shift_limit=20, p=0.5),
-    A.OneOf([
-        A.GaussianBlur(blur_limit=3, p=0.5),
-        A.MedianBlur(blur_limit=3, p=0.5),
-    ], p=0.3),
-    A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-    ToTensorV2()
+# Transformaciones optimizadas para RTX
+train_transform = transforms.Compose([
+    transforms.Resize((256, 256)),
+    transforms.RandomCrop(224),
+    transforms.RandomHorizontalFlip(p=0.5),
+    transforms.RandomVerticalFlip(p=0.3),
+    transforms.RandomRotation(degrees=15),
+    transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
 ])
 
-val_transform = A.Compose([
-    A.Resize(224, 224),
-    A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-    ToTensorV2()
+val_transform = transforms.Compose([
+    transforms.Resize((224, 224)),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
 ])
 
-def create_data_loaders(csv_file, image_folders, batch_size=32, test_size=0.2):
-    """DataLoaders para Fase 1"""
-    # Dividir datos
+def create_data_loaders(csv_file, image_folders, batch_size=16, test_size=0.2):
+    """Crear DataLoaders optimizados para RTX"""
+    
+    # Verificar archivos
+    if not os.path.exists(csv_file):
+        raise FileNotFoundError(f"No se encontró el archivo CSV: {csv_file}")
+    
+    for folder in image_folders:
+        if not os.path.exists(folder):
+            raise FileNotFoundError(f"No se encontró la carpeta: {folder}")
+    
+    print(f"📂 Cargando datos desde: {csv_file}")
+    print(f"📁 Carpetas de imágenes: {image_folders}")
+    
+    # Cargar CSV
     df = pd.read_csv(csv_file)
+    print(f"📊 Total de muestras: {len(df)}")
+    
+    # Verificar columnas necesarias
+    required_cols = ['image_id', 'dx']
+    for col in required_cols:
+        if col not in df.columns:
+            raise ValueError(f"Columna requerida '{col}' no encontrada en CSV")
+    
+    # Split estratificado
     train_df, val_df = train_test_split(
-        df, test_size=test_size, 
+        df, 
+        test_size=test_size, 
         stratify=df['dx'], 
         random_state=42
     )
     
-    # Guardar splits
+    print(f"🔄 División de datos:")
+    print(f"   Entrenamiento: {len(train_df)} muestras")
+    print(f"   Validación: {len(val_df)} muestras")
+    
+    # Guardar splits para reproducibilidad
     train_df.to_csv('train_split.csv', index=False)
     val_df.to_csv('val_split.csv', index=False)
     
@@ -288,88 +120,109 @@ def create_data_loaders(csv_file, image_folders, batch_size=32, test_size=0.2):
     train_data = HAM10000Dataset('train_split.csv', image_folders, train_transform)
     val_data = HAM10000Dataset('val_split.csv', image_folders, val_transform)
     
-    # Crear DataLoaders
+    # Configurar workers para RTX
+    num_workers = min(multiprocessing.cpu_count(), 8)  # Máximo 8 workers
+    
+    print(f"⚙️  Configuración DataLoader:")
+    print(f"   Batch size: {batch_size}")
+    print(f"   Workers: {num_workers}")
+    print(f"   Pin memory: True (GPU)")
+    
+    # DataLoaders optimizados para RTX
     train_loader = DataLoader(
-        train_data, batch_size=batch_size, shuffle=True, 
-        num_workers=4, pin_memory=True
+        train_data, 
+        batch_size=batch_size, 
+        shuffle=True, 
+        num_workers=num_workers,
+        pin_memory=True,  # Optimización para GPU
+        persistent_workers=True if num_workers > 0 else False,
+        drop_last=True  # Para estabilidad con AMP
     )
+    
     val_loader = DataLoader(
-        val_data, batch_size=batch_size, shuffle=False, 
-        num_workers=4, pin_memory=True
+        val_data, 
+        batch_size=batch_size, 
+        shuffle=False, 
+        num_workers=num_workers,
+        pin_memory=True,
+        persistent_workers=True if num_workers > 0 else False,
+        drop_last=False
     )
+    
+    print(f"✅ DataLoaders creados exitosamente!")
+    print(f"   Train batches: {len(train_loader)}")
+    print(f"   Val batches: {len(val_loader)}")
     
     return train_loader, val_loader, train_data.label_encoder
 
-def create_data_loaders_phase2(csv_file, image_folders, batch_size=16, test_size=0.2, num_context_images=3):
-    """DataLoaders para Fase 2 - Con imágenes contextuales"""
-    # Dividir datos
+def verify_dataset(csv_file, image_folders, sample_size=10):
+    """Verificar integridad del dataset"""
+    print(f"🔍 Verificando dataset...")
+    
     df = pd.read_csv(csv_file)
-    train_df, val_df = train_test_split(
-        df, test_size=test_size, 
-        stratify=df['dx'], 
-        random_state=42
-    )
     
-    # Guardar splits
-    train_df.to_csv('train_split.csv', index=False)
-    val_df.to_csv('val_split.csv', index=False)
+    # Verificar muestra aleatoria
+    sample_df = df.sample(n=min(sample_size, len(df)))
     
-    # Crear datasets
-    train_data = HAM10000DatasetPhase2(
-        'train_split.csv', image_folders, train_transform, 
-        num_context_images, phase='train'
-    )
-    val_data = HAM10000DatasetPhase2(
-        'val_split.csv', image_folders, val_transform, 
-        num_context_images, phase='val'
-    )
+    missing_images = []
+    for _, row in sample_df.iterrows():
+        image_id = row['image_id']
+        found = False
+        
+        for folder in image_folders:
+            image_path = os.path.join(folder, f"{image_id}.jpg")
+            if os.path.exists(image_path):
+                found = True
+                break
+        
+        if not found:
+            missing_images.append(image_id)
     
-    # Función de collate personalizada para manejar estructura compleja
-    def collate_fn(batch):
-        if isinstance(batch[0], dict):
-            # Entrenamiento - estructura compleja
-            main_images = torch.stack([item['main_image'] for item in batch])
-            context_images = torch.stack([item['context_images'] for item in batch])
-            main_labels = torch.stack([item['main_label'] for item in batch])
-            context_labels = torch.stack([item['context_labels'] for item in batch])
-            
-            return {
-                'main_images': main_images,      # [B, C, H, W]
-                'context_images': context_images, # [B, M, C, H, W]
-                'main_labels': main_labels,      # [B]
-                'context_labels': context_labels # [B, M]
-            }
-        else:
-            # Validación - estructura simple
-            images = torch.stack([item[0] for item in batch])
-            labels = torch.stack([item[1] for item in batch])
-            return images, labels
+    if missing_images:
+        print(f"⚠️  Imágenes faltantes encontradas: {len(missing_images)}")
+        for img_id in missing_images[:5]:  # Mostrar solo las primeras 5
+            print(f"   - {img_id}.jpg")
+        if len(missing_images) > 5:
+            print(f"   ... y {len(missing_images) - 5} más")
+    else:
+        print(f"✅ Todas las imágenes verificadas están presentes")
     
-    # Crear DataLoaders con collate personalizado
-    train_loader = DataLoader(
-        train_data, batch_size=batch_size, shuffle=True, 
-        num_workers=4, pin_memory=True, collate_fn=collate_fn
-    )
-    val_loader = DataLoader(
-        val_data, batch_size=batch_size, shuffle=False, 
-        num_workers=4, pin_memory=True, collate_fn=collate_fn
-    )
-    
-    return train_loader, val_loader, train_data.label_encoder
+    return len(missing_images) == 0
 
-# Uso
 if __name__ == "__main__":
+    # Test del dataset
     csv_file = "datasetHam10000/HAM10000_metadata.csv"
-    image_folders = ["datasetHam10000/HAM10000_images_part_1", "datasetHam10000/HAM10000_images_part_2"]  # Rutas corregidas
+    image_folders = [
+        "datasetHam10000/HAM10000_images_part_1", 
+        "datasetHam10000/HAM10000_images_part_2"
+    ]
     
-    print("Probando Dataset Fase 2...")
-    train_loader, val_loader, label_encoder = create_data_loaders_phase2(
-        csv_file, image_folders, batch_size=4, num_context_images=3
-    )
+    print("🧪 Probando dataset HAM10000...")
     
-    # Probar un batch
-    batch = next(iter(train_loader))
-    print(f"Main images: {batch['main_images'].shape}")
-    print(f"Context images: {batch['context_images'].shape}")
-    print(f"Main labels: {batch['main_labels'].shape}")
-    print(f"Context labels: {batch['context_labels'].shape}")
+    # Verificar dataset
+    if verify_dataset(csv_file, image_folders):
+        print("✅ Dataset verificado correctamente")
+        
+        # Crear DataLoaders de prueba
+        try:
+            train_loader, val_loader, label_encoder = create_data_loaders(
+                csv_file, image_folders, batch_size=4
+            )
+            
+            # Test de carga
+            print("🔄 Probando carga de batch...")
+            for batch_idx, (images, labels) in enumerate(train_loader):
+                print(f"Batch {batch_idx + 1}:")
+                print(f"  Images shape: {images.shape}")
+                print(f"  Labels shape: {labels.shape}")
+                print(f"  Labels: {labels.tolist()}")
+                
+                if batch_idx >= 2:  # Solo probar 3 batches
+                    break
+            
+            print("✅ Dataset funcionando correctamente!")
+            
+        except Exception as e:
+            print(f"❌ Error en DataLoaders: {e}")
+    else:
+        print("❌ Problemas en la verificación del dataset")

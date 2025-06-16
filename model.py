@@ -3,286 +3,312 @@ import torch.nn as nn
 import torch.nn.functional as F
 import timm
 import math
+from torch.utils.checkpoint import checkpoint
 
-class MultiKernelSelfAttention(nn.Module):
-    """Multi-Kernel Self-Attention (MKSA) con dimensiones dinámicas"""
-    def __init__(self, in_channels, reduction=8, kernel_sizes=[1, 3, 5, 7]):
-        super(MultiKernelSelfAttention, self).__init__()
+class MemoryEfficientMKSA(nn.Module):
+    """MKSA ultra-eficiente para RTX 3070 Ti (8GB)"""
+    def __init__(self, in_channels, reduction=16, max_spatial_size=16):
+        super(MemoryEfficientMKSA, self).__init__()
         self.in_channels = in_channels
-        self.reduced_channels = max(in_channels // reduction, 8)  # Mínimo 8 canales
-        self.kernel_sizes = kernel_sizes
+        self.reduced_channels = max(in_channels // reduction, 8)
+        self.max_spatial_size = max_spatial_size
         
-        # Multi-queries con diferentes kernel sizes
-        self.multi_queries = nn.ModuleList()
-        for k_size in kernel_sizes:
-            padding = k_size // 2
-            self.multi_queries.append(
-                nn.Conv2d(in_channels, self.reduced_channels, 
-                         kernel_size=k_size, padding=padding, bias=False)
-            )
-        
-        # Key y Value compartidos
+        # Solo convs 1x1 para ahorrar memoria
+        self.query = nn.Conv2d(in_channels, self.reduced_channels, 1, bias=False)
         self.key = nn.Conv2d(in_channels, self.reduced_channels, 1, bias=False)
         self.value = nn.Conv2d(in_channels, in_channels, 1, bias=False)
         
-        # Proyección final
-        self.projection = nn.Conv2d(in_channels * len(kernel_sizes), in_channels, 1, bias=False)
+        # Channel attention como alternativa eficiente
+        self.channel_attention = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Conv2d(in_channels, in_channels // 16, 1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(in_channels // 16, in_channels, 1),
+            nn.Sigmoid()
+        )
         
-        # Normalización
+        # Spatial attention simple
+        self.spatial_conv = nn.Conv2d(2, 1, 7, padding=3, bias=False)
+        
         self.norm = nn.BatchNorm2d(in_channels)
-        
-        # Activación suave
-        self.softmax = nn.Softmax(dim=-1)
+        self.dropout = nn.Dropout2d(0.1)
         
     def forward(self, x):
         B, C, H, W = x.shape
         
-        # Generar múltiples queries
-        queries = []
-        for i, query_conv in enumerate(self.multi_queries):
-            q = query_conv(x)  # [B, reduced_channels, H, W]
-            q = q.view(B, self.reduced_channels, -1)  # [B, reduced_channels, H*W]
-            queries.append(q)
+        # Si la resolución es muy alta, usar solo channel+spatial attention
+        if H * W > self.max_spatial_size * self.max_spatial_size:
+            return self._lightweight_attention(x)
         
-        # Key y Value
-        k = self.key(x).view(B, self.reduced_channels, -1)  # [B, reduced_channels, H*W]
-        v = self.value(x).view(B, C, -1)  # [B, C, H*W]
+        # Self-attention solo para resoluciones pequeñas
+        return self._self_attention(x)
+    
+    def _lightweight_attention(self, x):
+        """Attention ligero para resoluciones altas"""
+        # Channel attention
+        channel_weights = self.channel_attention(x)
+        x_channel = x * channel_weights
         
-        # Compute attention para cada query
-        attended_features = []
-        for q in queries:
-            # Attention scores
-            attention_scores = torch.bmm(q.transpose(1, 2), k)  # [B, H*W, H*W]
-            attention_weights = self.softmax(attention_scores / math.sqrt(self.reduced_channels))
-            
-            # Apply attention
-            attended = torch.bmm(v, attention_weights.transpose(1, 2))  # [B, C, H*W]
-            attended = attended.view(B, C, H, W)  # [B, C, H, W]
-            attended_features.append(attended)
+        # Spatial attention
+        avg_pool = torch.mean(x_channel, dim=1, keepdim=True)
+        max_pool, _ = torch.max(x_channel, dim=1, keepdim=True)
+        spatial_concat = torch.cat([avg_pool, max_pool], dim=1)
+        spatial_weights = torch.sigmoid(self.spatial_conv(spatial_concat))
         
-        # Concatenar y proyectar
-        concatenated = torch.cat(attended_features, dim=1)  # [B, C*len(kernels), H, W]
-        output = self.projection(concatenated)  # [B, C, H, W]
+        output = x_channel * spatial_weights
+        return self.norm(output + x)
+    
+    def _self_attention(self, x):
+        """Self-attention para resoluciones pequeñas"""
+        B, C, H, W = x.shape
         
-        # Residual connection + normalización
-        output = self.norm(output + x)
+        # Downsample agresivamente si es necesario
+        if H > self.max_spatial_size or W > self.max_spatial_size:
+            scale = min(self.max_spatial_size / H, self.max_spatial_size / W)
+            x_small = F.interpolate(x, scale_factor=scale, mode='bilinear', align_corners=False)
+        else:
+            x_small = x
         
-        return output
+        B, C, H_s, W_s = x_small.shape
+        
+        # QKV
+        q = self.query(x_small).view(B, self.reduced_channels, -1)  # [B, C_r, H_s*W_s]
+        k = self.key(x_small).view(B, self.reduced_channels, -1)    # [B, C_r, H_s*W_s]
+        v = self.value(x_small).view(B, C, -1)                      # [B, C, H_s*W_s]
+        
+        # Attention
+        attention_scores = torch.bmm(q.transpose(1, 2), k) / math.sqrt(self.reduced_channels)
+        attention_weights = F.softmax(attention_scores, dim=-1)
+        
+        # Apply attention
+        attended = torch.bmm(v, attention_weights.transpose(1, 2))
+        attended = attended.view(B, C, H_s, W_s)
+        
+        # Upsample back
+        if (H_s, W_s) != (H, W):
+            attended = F.interpolate(attended, size=(H, W), mode='bilinear', align_corners=False)
+        
+        return self.norm(attended + x)
 
-class CrossStageAttention(nn.Module):
-    """Cross-Stage Attention mejorado"""
-    def __init__(self, feature_dims, final_dim=1280):
-        super(CrossStageAttention, self).__init__()
+class FixedCrossStageAttention(nn.Module):
+    """Cross-stage attention con dimensiones fijas"""
+    def __init__(self, feature_dims, output_dim=512):
+        super(FixedCrossStageAttention, self).__init__()
         self.feature_dims = feature_dims
-        self.final_dim = final_dim
+        self.output_dim = output_dim
         
-        # Proyecciones para igualar dimensiones
+        print(f"🔧 Creando Cross-Stage Attention:")
+        print(f"   Feature dims: {feature_dims}")
+        print(f"   Output dim: {output_dim}")
+        
+        # Calcular dimensiones de proyección que sumen exactamente output_dim
+        total_features = len(feature_dims)
+        base_proj_dim = output_dim // total_features
+        
+        # Distribuir las dimensiones para que sumen exactamente output_dim
+        proj_dims = [base_proj_dim] * total_features
+        remainder = output_dim - sum(proj_dims)
+        
+        # Distribuir el resto en las primeras capas
+        for i in range(remainder):
+            proj_dims[i] += 1
+        
+        print(f"   Projection dims: {proj_dims} (suma: {sum(proj_dims)})")
+        
+        # Proyecciones con dimensiones exactas
         self.projections = nn.ModuleList()
-        for dim in feature_dims:
+        for i, (dim, proj_dim) in enumerate(zip(feature_dims, proj_dims)):
             self.projections.append(
                 nn.Sequential(
                     nn.AdaptiveAvgPool2d(1),
-                    nn.Conv2d(dim, final_dim // len(feature_dims), 1),
-                    nn.ReLU(inplace=True)
+                    nn.Flatten(),
+                    nn.Linear(dim, proj_dim),
+                    nn.ReLU(inplace=True),
+                    nn.Dropout(0.2)
                 )
             )
+            print(f"   Level {i}: {dim} -> {proj_dim}")
         
-        # Attention weights
-        self.attention_weights = nn.Sequential(
-            nn.Linear(final_dim, len(feature_dims)),
-            nn.Softmax(dim=1)
+        # Fusión simple - input será exactamente output_dim
+        self.fusion = nn.Sequential(
+            nn.Linear(output_dim, output_dim),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.2)
         )
         
     def forward(self, feature_maps):
-        # Proyectar cada feature map
-        projected = []
+        features = []
         for i, feature_map in enumerate(feature_maps):
-            proj = self.projections[i](feature_map)  # [B, final_dim//len, 1, 1]
-            projected.append(proj.squeeze(-1).squeeze(-1))  # [B, final_dim//len]
+            feat = self.projections[i](feature_map)
+            features.append(feat)
+            # Debug: verificar dimensiones
+            # print(f"Feature {i} shape: {feat.shape}")
         
-        # Concatenar características
-        concatenated = torch.cat(projected, dim=1)  # [B, final_dim]
+        concatenated = torch.cat(features, dim=1)
+        # print(f"Concatenated shape: {concatenated.shape}")
         
-        # Calcular attention weights
-        weights = self.attention_weights(concatenated)  # [B, len(feature_dims)]
-        
-        # Aplicar attention
-        weighted_features = []
-        for i, proj_feat in enumerate(projected):
-            weighted = proj_feat * weights[:, i:i+1]
-            weighted_features.append(weighted)
-        
-        return torch.cat(weighted_features, dim=1)  # [B, final_dim]
+        return self.fusion(concatenated)
 
-class CIFFNetPhase1(nn.Module):
-    """CIFF-Net Fase 1 con dimensiones dinámicas"""
+class CIFFNetRTX8GB(nn.Module):
+    """CIFF-Net optimizado para 8GB VRAM con dimensiones fijas"""
     def __init__(self, num_classes=7, backbone='efficientnet_b0', pretrained=True):
-        super(CIFFNetPhase1, self).__init__()
+        super(CIFFNetRTX8GB, self).__init__()
         
-        # Backbone
+        print(f"🔥 Creando CIFF-Net RTX 8GB...")
+        print(f"   Backbone: {backbone}")
+        print(f"   Clases: {num_classes}")
+        
+        # Backbone más conservador
         self.backbone = timm.create_model(backbone, pretrained=pretrained, features_only=True)
         
-        # Obtener información del backbone
+        # Feature info con verificación
         with torch.no_grad():
             dummy_input = torch.randn(1, 3, 224, 224)
+            if torch.cuda.is_available():
+                dummy_input = dummy_input.cuda()
+                self.backbone = self.backbone.cuda()
+            
             features = self.backbone(dummy_input)
             self.feature_info = [(f.shape[1], f.shape[2:]) for f in features]
         
-        print(f"📏 Feature dimensions: {self.feature_info}")
+        print(f"🔥 RTX 8GB Feature dimensions: {self.feature_info}")
         
-        # MKSA modules para cada nivel de características
+        # MKSA solo en la última capa
         self.mksa_modules = nn.ModuleList()
-        for channels, spatial_size in self.feature_info:
-            self.mksa_modules.append(
-                MultiKernelSelfAttention(channels, reduction=8)
-            )
+        for i, (channels, spatial_size) in enumerate(self.feature_info):
+            if i == len(self.feature_info) - 1:  # Solo última capa
+                max_spatial = min(max(spatial_size), 16)  # Limitar resolución
+                self.mksa_modules.append(
+                    MemoryEfficientMKSA(channels, reduction=16, max_spatial_size=max_spatial)
+                )
+                print(f"   Level {i}: MKSA aplicado (max_spatial: {max_spatial})")
+            else:
+                # Channel attention simple para otras capas
+                self.mksa_modules.append(
+                    nn.Sequential(
+                        nn.AdaptiveAvgPool2d(1),
+                        nn.Conv2d(channels, channels // 16, 1),
+                        nn.ReLU(inplace=True),
+                        nn.Conv2d(channels // 16, channels, 1),
+                        nn.Sigmoid()
+                    )
+                )
+                print(f"   Level {i}: Channel attention simple")
         
-        # Cross-Stage Attention
+        # Cross-stage attention con dimensiones fijas
         feature_dims = [info[0] for info in self.feature_info]
-        final_feature_dim = sum(channels // len(feature_dims) for channels in feature_dims)
+        cs_output_dim = 512  # Dimensión fija
+        self.cs_attention = FixedCrossStageAttention(feature_dims, output_dim=cs_output_dim)
         
-        self.cs_attention = CrossStageAttention(feature_dims, final_feature_dim)
-        
-        # Global pooling
-        self.global_pool = nn.AdaptiveAvgPool2d(1)
-        self.global_max_pool = nn.AdaptiveMaxPool2d(1)
-        
-        # Clasificador
-        classifier_input_dim = final_feature_dim * 2  # avg + max pooling
-        
+        # Clasificador con dimensión de entrada exacta
+        print(f"🧠 Creando clasificador: {cs_output_dim} -> {num_classes}")
         self.classifier = nn.Sequential(
-            nn.Dropout(0.5),
-            nn.Linear(classifier_input_dim, 512),
-            nn.ReLU(inplace=True),
-            nn.BatchNorm1d(512),
-            nn.Dropout(0.3),
-            nn.Linear(512, 256),
+            nn.Dropout(0.4),
+            nn.Linear(cs_output_dim, 256),  # Input exacto
             nn.ReLU(inplace=True),
             nn.BatchNorm1d(256),
+            nn.Dropout(0.3),
+            nn.Linear(256, 128),
+            nn.ReLU(inplace=True),
+            nn.BatchNorm1d(128),
             nn.Dropout(0.2),
-            nn.Linear(256, num_classes)
+            nn.Linear(128, num_classes)
         )
         
-        # Para almacenar feature maps (útil para visualización)
-        self.feature_maps = []
+        # Gradient checkpointing para ahorrar memoria
+        self.use_checkpoint = True
+        
+        print(f"✅ CIFF-Net RTX 8GB creado exitosamente!")
         
     def forward(self, x):
-        # Limpiar feature maps anteriores
-        self.feature_maps = []
+        # Extraer características con checkpointing
+        if self.training and self.use_checkpoint:
+            features = checkpoint(self.backbone, x)
+        else:
+            features = self.backbone(x)
         
-        # Extraer características del backbone
-        features = self.backbone(x)
-        
-        # Aplicar MKSA a cada nivel
+        # Aplicar attention
         attended_features = []
         for i, feature_map in enumerate(features):
-            self.feature_maps.append(feature_map)
-            attended = self.mksa_modules[i](feature_map)
+            if isinstance(self.mksa_modules[i], MemoryEfficientMKSA):
+                # MKSA con checkpointing
+                if self.training and self.use_checkpoint:
+                    attended = checkpoint(self.mksa_modules[i], feature_map)
+                else:
+                    attended = self.mksa_modules[i](feature_map)
+            else:
+                # Channel attention simple
+                channel_attention = self.mksa_modules[i](feature_map)
+                attended = feature_map * channel_attention
+            
             attended_features.append(attended)
         
         # Cross-stage attention
         fused_features = self.cs_attention(attended_features)
         
-        # Clasificación
-        output = self.classifier(fused_features)
+        # Debug: verificar dimensión antes del clasificador
+        # print(f"Fused features shape: {fused_features.shape}")
         
-        return output
-    
-    def get_attention_maps(self, x):
-        """Obtener mapas de atención para visualización"""
-        self.eval()
-        with torch.no_grad():
-            _ = self.forward(x)
-            return self.feature_maps
+        return self.classifier(fused_features)
 
-def create_ciff_net_phase1(num_classes=7, backbone='efficientnet_b0', pretrained=True):
-    """Factory function para crear CIFF-Net Fase 1"""
-    return CIFFNetPhase1(num_classes, backbone, pretrained)
+def create_ciff_net_rtx8gb(num_classes=7, backbone='efficientnet_b0', pretrained=True):
+    """Factory para RTX 8GB"""
+    return CIFFNetRTX8GB(num_classes, backbone, pretrained)
 
-def model_summary(model, input_size=(1, 3, 224, 224)):
-    """Resumen mejorado del modelo"""
+def rtx8gb_model_summary(model, input_size=(1, 3, 224, 224)):
+    """Resumen RTX 8GB con verificación de dimensiones"""
     print("=" * 60)
-    print("CIFF-NET FASE 1 - MODEL SUMMARY")
+    print("🔥 CIFF-NET RTX 8GB MEMORY-OPTIMIZED")
     print("=" * 60)
     
-    # Información básica
     total_params = sum(p.numel() for p in model.parameters())
-    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"Parámetros: {total_params:,}")
+    print(f"Memoria estimada: {total_params * 4 / 1e9:.2f} GB")
     
-    print(f"Modelo: {model.__class__.__name__}")
-    print(f"Parámetros totales: {total_params:,}")
-    print(f"Parámetros entrenables: {trainable_params:,}")
-    
-    # Test forward pass
-    model.eval()
-    try:
+    if torch.cuda.is_available():
+        print(f"🔥 GPU: {torch.cuda.get_device_name(0)}")
+        print(f"💾 VRAM: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
+        
+        model = model.cuda()
+        model.eval()
+        
         with torch.no_grad():
-            x = torch.randn(*input_size)
-            output = model(x)
-            print(f"Input shape: {tuple(x.shape)}")
-            print(f"Output shape: {tuple(output.shape)}")
+            # Limpiar cache
+            torch.cuda.empty_cache()
             
-            # Información de características
-            if hasattr(model, 'feature_info'):
-                print(f"\nFeature levels: {len(model.feature_info)}")
-                for i, (channels, spatial) in enumerate(model.feature_info):
-                    print(f"  Level {i+1}: {channels} channels, spatial {spatial}")
-        
-        print("✅ Forward pass exitoso")
-        
-    except Exception as e:
-        print(f"❌ Error en forward pass: {e}")
-        # Información de debug
-        if hasattr(model, 'backbone'):
-            print(f"Backbone: {type(model.backbone)}")
-        
+            x = torch.randn(*input_size).cuda()
+            memory_before = torch.cuda.memory_allocated() / 1e9
+            
+            print(f"🧪 Probando forward pass...")
+            try:
+                output = model(x)
+                print(f"✅ Forward exitoso!")
+                print(f"   Input: {tuple(x.shape)} -> Output: {tuple(output.shape)}")
+                
+                memory_after = torch.cuda.memory_allocated() / 1e9
+                memory_used = memory_after - memory_before
+                print(f"   VRAM utilizada: {memory_used:.2f} GB")
+                print(f"   VRAM libre: {8.0 - memory_after:.2f} GB")
+                
+                # Test con batch más grande
+                print(f"🧪 Probando batch size 4...")
+                x_batch = torch.randn(4, 3, 224, 224).cuda()
+                output_batch = model(x_batch)
+                print(f"✅ Batch test exitoso: {tuple(x_batch.shape)} -> {tuple(output_batch.shape)}")
+                
+            except Exception as e:
+                print(f"❌ Error en forward pass: {e}")
+                
     print("=" * 60)
-
-def count_parameters(model):
-    """Contar parámetros del modelo"""
-    total = sum(p.numel() for p in model.parameters())
-    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    
-    # Desglose por módulos
-    backbone_params = sum(p.numel() for p in model.backbone.parameters())
-    mksa_params = sum(p.numel() for p in model.mksa_modules.parameters())
-    cs_attention_params = sum(p.numel() for p in model.cs_attention.parameters())
-    classifier_params = sum(p.numel() for p in model.classifier.parameters())
-    
-    return {
-        'total': total,
-        'trainable': trainable,
-        'backbone': backbone_params,
-        'mksa': mksa_params,
-        'cs_attention': cs_attention_params,
-        'classifier': classifier_params
-    }
 
 if __name__ == "__main__":
-    print("🧠 Probando CIFF-Net Fase 1...")
+    print("🔥 Probando CIFF-Net RTX 8GB...")
     
-    # Crear modelo
-    model = create_ciff_net_phase1(num_classes=7)
-    
-    # Resumen
-    model_summary(model)
-    
-    # Contar parámetros
-    params = count_parameters(model)
-    print("\n📊 Desglose de parámetros:")
-    for name, count in params.items():
-        print(f"  {name}: {count:,}")
-    
-    # Test con batch
-    print("\n🔧 Probando con batch...")
-    model.eval()
-    with torch.no_grad():
-        batch = torch.randn(4, 3, 224, 224)
-        output = model(batch)
-        print(f"✅ Batch output: {output.shape}")
+    if torch.cuda.is_available():
+        # Limpiar cache
+        torch.cuda.empty_cache()
         
-        # Obtener attention maps
-        attention_maps = model.get_attention_maps(batch[:1])
-        print(f"📍 Attention maps: {len(attention_maps)} niveles")
-        for i, am in enumerate(attention_maps):
-            print(f"  Nivel {i+1}: {am.shape}")
+        model = create_ciff_net_rtx8gb(num_classes=7)
+        rtx8gb_model_summary(model)
+    else:
+        print("❌ CUDA no disponible")
