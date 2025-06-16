@@ -58,6 +58,10 @@ class CliffAwareClassifier(nn.Module):
     def forward(self, enhanced_features, cliff_scores, training=True):
         batch_size = enhanced_features.size(0)
         
+        # ✅ CORREGIDO: Asegurar dimensiones correctas de cliff_scores
+        if cliff_scores.dim() > 1:
+            cliff_scores = cliff_scores.squeeze(-1)  # [batch_size, 1] → [batch_size]
+        
         # Clasificación principal
         main_logits = self.classifier(enhanced_features)
         
@@ -67,13 +71,13 @@ class CliffAwareClassifier(nn.Module):
         # Uncertainty estimation
         uncertainty_scores = self.uncertainty_layers(enhanced_features).squeeze(-1)
         
-        # Determinar qué samples son cliff
+        # ✅ CORREGIDO: cliff_mask ahora será [batch_size]
         cliff_mask = cliff_scores > self.cliff_threshold
         
         # Combinar logits basado en cliff detection
         final_logits = main_logits.clone()
         if cliff_mask.any():
-            # Para casos cliff, usar clasificador especializado
+            # ✅ CORREGIDO: Indexación correcta
             final_logits[cliff_mask] = cliff_logits[cliff_mask]
         
         # Aplicar softmax para probabilidades
@@ -352,7 +356,7 @@ def test_phase3_complete():
     # Simular phase2_outputs
     phase2_outputs = {
         'enhanced_features': torch.randn(batch_size, input_dim).to(device),
-        'cliff_score': torch.rand(batch_size).to(device)
+        'cliff_score': torch.rand(batch_size).to(device)  # ✅ CORREGIDO: [batch_size] no [batch_size, 1]
     }
     
     # Forward pass
