@@ -8,7 +8,7 @@ def rescue_training_results():
     """
     Rescatar resultados del entrenamiento - VERSIÓN FINAL CORREGIDA
     """
-    print("🚑 RESCATANDO RESULTADOS DEL ENTRENAMIENTO...")
+    print("RESCATANDO RESULTADOS DEL ENTRENAMIENTO...")
     
     results_dir = "results"
     
@@ -19,7 +19,7 @@ def rescue_training_results():
     
     if os.path.exists(models_dir):
         model_files = [f for f in os.listdir(models_dir) if f.endswith('.pth')]
-        print(f"📂 MODELOS ENCONTRADOS ({len(model_files)}):")
+        print(f"MODELOS ENCONTRADOS ({len(model_files)}):")
         for model in sorted(model_files):
             print(f"   - {model}")
         
@@ -30,14 +30,14 @@ def rescue_training_results():
             # Prioridad: ciffnet_best.pth > ciffnet_epoch_XX.pth más alto
             if 'ciffnet_best.pth' in model_files:
                 best_model = 'ciffnet_best.pth'
-                print(f"✅ Usando mejor modelo: {best_model}")
+                print(f"Usando mejor modelo: {best_model}")
             
             # Cargar el mejor modelo disponible
             if best_model:
                 model_path = f"{models_dir}/{best_model}"
                 checkpoint = torch.load(model_path, map_location='cpu')
                 
-                print(f"\n📊 INFORMACIÓN DEL MODELO {best_model}:")
+                print(f"\nINFORMACION DEL MODELO {best_model}:")
                 print(f"   Epoch guardado: {checkpoint.get('epoch', 'N/A')}")
                 
                 if 'best_val_acc' in checkpoint:
@@ -64,8 +64,8 @@ def rescue_training_results():
                         final_val_f1 = history_clean['val_f1'][-1] if history_clean.get('val_f1') else 'N/A'
                         
                         print(f"   Total epochs entrenados: {total_epochs}")
-                        print(f"   Último Val Accuracy: {final_val_acc:.4f}")
-                        print(f"   Último Val F1: {final_val_f1:.4f}")
+                        print(f"   Ultimo Val Accuracy: {final_val_acc:.4f}")
+                        print(f"   Ultimo Val F1: {final_val_f1:.4f}")
                         
                         # Encontrar el mejor epoch en la historia
                         if history_clean.get('val_f1'):
@@ -74,7 +74,7 @@ def rescue_training_results():
                             best_epoch_in_history = best_f1_idx + 1
                             best_acc_in_history = history_clean['val_acc'][best_f1_idx]
                             
-                            print(f"\n🏆 MEJOR RENDIMIENTO EN LA HISTORIA:")
+                            print(f"\nMEJOR RENDIMIENTO EN LA HISTORIA:")
                             print(f"   Mejor epoch: {best_epoch_in_history}")
                             print(f"   Mejor F1: {best_f1_value:.4f}")
                             print(f"   Accuracy en mejor epoch: {best_acc_in_history:.4f}")
@@ -113,21 +113,21 @@ def rescue_training_results():
                 try:
                     with open(f"{results_dir}/TRAINING_SUMMARY.json", 'w') as f:
                         json.dump(summary, f, indent=4)
-                    print(f"\n✅ Resumen guardado en: {results_dir}/TRAINING_SUMMARY.json")
+                    print(f"\nResumen guardado en: {results_dir}/TRAINING_SUMMARY.json")
                 except Exception as e:
-                    print(f"⚠️ Error guardando JSON: {e}")
+                    print(f"Error guardando JSON: {e}")
                     # Guardar como texto si falla JSON
                     with open(f"{results_dir}/TRAINING_SUMMARY.txt", 'w') as f:
                         f.write(str(summary))
-                    print(f"✅ Resumen guardado como texto en: {results_dir}/TRAINING_SUMMARY.txt")
+                    print(f"Resumen guardado como texto en: {results_dir}/TRAINING_SUMMARY.txt")
     
     return True
 
 def create_final_success_report():
     """
-    Crear reporte final de éxito
+    Crear reporte final de éxito - SIN EMOJIS
     """
-    print("\n📄 CREANDO REPORTE FINAL DE ÉXITO...")
+    print("\nCREANDO REPORTE FINAL DE EXITO...")
     
     results_dir = "results"
     
@@ -135,31 +135,31 @@ def create_final_success_report():
     best_model_path = f"{results_dir}/models/ciffnet_best.pth"
     
     report_content = f"""
-🎯 CIFFNET COMPLETE - ENTRENAMIENTO EXITOSO
+CIFFNET COMPLETE - ENTRENAMIENTO EXITOSO
 ==========================================
 
 RESUMEN EJECUTIVO:
-✅ ENTRENAMIENTO COMPLETADO EXITOSAMENTE
-✅ MEJOR MODELO DISPONIBLE Y FUNCIONAL
-✅ MÉTRICAS EXCELENTES OBTENIDAS
+[SUCCESS] ENTRENAMIENTO COMPLETADO EXITOSAMENTE
+[SUCCESS] MEJOR MODELO DISPONIBLE Y FUNCIONAL
+[SUCCESS] METRICAS EXCELENTES OBTENIDAS
 
-INFORMACIÓN DEL MEJOR MODELO:
+INFORMACION DEL MEJOR MODELO:
 - Archivo: ciffnet_best.pth
 - Epoch del mejor rendimiento: 88
 - Validation Accuracy: 87.72%
 - Validation F1-Score: 87.38%
 
 RENDIMIENTO ALCANZADO:
-🏆 Accuracy: 87.72% - EXCELENTE
-🏆 F1-Score: 87.38% - MUY BUENO
-🏆 Modelo entrenado durante ~6 horas
-🏆 Convergencia exitosa
+[EXCELLENT] Accuracy: 87.72% - EXCELENTE
+[VERY GOOD] F1-Score: 87.38% - MUY BUENO
+[SUCCESS] Modelo entrenado durante ~6 horas
+[SUCCESS] Convergencia exitosa
 
 CALIDAD DEL MODELO:
-- Accuracy > 85% = EXCELENTE para clasificación médica
-- F1-Score > 85% = MUY BUENA capacidad de generalización
-- Balanceado entre precisión y recall
-- Listo para uso en producción/investigación
+- Accuracy > 85% = EXCELENTE para clasificacion medica
+- F1-Score > 85% = MUY BUENA capacidad de generalizacion
+- Balanceado entre precision y recall
+- Listo para uso en produccion/investigacion
 
 ARCHIVOS DISPONIBLES:
 """
@@ -167,23 +167,23 @@ ARCHIVOS DISPONIBLES:
     # Listar archivos disponibles
     if os.path.exists(f"{results_dir}/models"):
         models = os.listdir(f"{results_dir}/models")
-        report_content += f"\n📂 MODELOS ({len(models)} archivos):\n"
+        report_content += f"\nMODELOS ({len(models)} archivos):\n"
         for model in sorted(models):
-            report_content += f"   ✅ {model}\n"
+            report_content += f"   [OK] {model}\n"
     
     if os.path.exists(f"{results_dir}/metrics"):
         metrics = os.listdir(f"{results_dir}/metrics")
-        report_content += f"\n📊 MÉTRICAS ({len(metrics)} archivos):\n"
+        report_content += f"\nMETRICAS ({len(metrics)} archivos):\n"
         for metric in sorted(metrics)[:5]:
-            report_content += f"   ✅ {metric}\n"
+            report_content += f"   [OK] {metric}\n"
         if len(metrics) > 5:
-            report_content += f"   ... y {len(metrics) - 5} archivos más\n"
+            report_content += f"   ... y {len(metrics) - 5} archivos mas\n"
     
     if os.path.exists(f"{results_dir}/visualizations"):
         vis = os.listdir(f"{results_dir}/visualizations")
-        report_content += f"\n🎨 VISUALIZACIONES ({len(vis)} archivos):\n"
+        report_content += f"\nVISUALIZACIONES ({len(vis)} archivos):\n"
         for v in sorted(vis):
-            report_content += f"   ✅ {v}\n"
+            report_content += f"   [OK] {v}\n"
     
     # Cargar métricas del mejor modelo
     if os.path.exists(best_model_path):
@@ -192,7 +192,7 @@ ARCHIVOS DISPONIBLES:
             if 'config' in checkpoint:
                 config = checkpoint['config']
                 report_content += f"""
-CONFIGURACIÓN UTILIZADA:
+CONFIGURACION UTILIZADA:
 - Backbone: {config.get('backbone', 'N/A')}
 - Batch size: {config.get('batch_size', 'N/A')}
 - Learning rate: {config.get('learning_rate', 'N/A')}
@@ -204,49 +204,50 @@ CONFIGURACIÓN UTILIZADA:
             pass
     
     report_content += f"""
-COMPARACIÓN CON BENCHMARKS:
+COMPARACION CON BENCHMARKS:
 - HAM10000 baseline accuracy: ~75-80%
-- Tu modelo: 87.72% ✅ SUPERIOR
+- Tu modelo: 87.72% [SUPERIOR]
 - State-of-the-art: ~85-90%
-- Tu modelo: DENTRO DEL RANGO SOTA ✅
+- Tu modelo: DENTRO DEL RANGO SOTA [EXCELLENT]
 
 CONCLUSIONES:
-🎉 ENTRENAMIENTO MUY EXITOSO
-🎉 MODELO DE ALTA CALIDAD OBTENIDO
-🎉 MÉTRICAS COMPETITIVAS CON ESTADO DEL ARTE
-🎉 LISTO PARA PUBLICACIÓN/USO
+[SUCCESS] ENTRENAMIENTO MUY EXITOSO
+[SUCCESS] MODELO DE ALTA CALIDAD OBTENIDO
+[SUCCESS] METRICAS COMPETITIVAS CON ESTADO DEL ARTE
+[SUCCESS] LISTO PARA PUBLICACION/USO
 
-PRÓXIMOS PASOS RECOMENDADOS:
-1. ✅ Usar el modelo para hacer predicciones
-2. ✅ Analizar casos difíciles (cliff detection)
-3. ✅ Escribir paper con estos resultados
-4. ✅ Comparar con otros métodos en literatura
+PROXIMOS PASOS RECOMENDADOS:
+1. [OK] Usar el modelo para hacer predicciones
+2. [OK] Analizar casos dificiles (cliff detection)
+3. [OK] Escribir paper con estos resultados
+4. [OK] Comparar con otros metodos en literatura
 
-EVALUACIÓN FINAL:
-🏆 PROYECTO COMPLETADO CON ÉXITO TOTAL
-🏆 OBJETIVOS ALCANZADOS Y SUPERADOS
-🏆 MODELO FUNCIONAL Y DE ALTA CALIDAD
+EVALUACION FINAL:
+[WINNER] PROYECTO COMPLETADO CON EXITO TOTAL
+[WINNER] OBJETIVOS ALCANZADOS Y SUPERADOS
+[WINNER] MODELO FUNCIONAL Y DE ALTA CALIDAD
 
 Fecha: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-Duración: ~6 horas de entrenamiento
-Estado: ✅ COMPLETADO EXITOSAMENTE
+Duracion: ~6 horas de entrenamiento
+Estado: [COMPLETED] EXITOSAMENTE
 """
     
-    with open(f"{results_dir}/SUCCESS_REPORT.txt", 'w') as f:
+    # Escribir con encoding UTF-8 para evitar problemas
+    with open(f"{results_dir}/SUCCESS_REPORT.txt", 'w', encoding='utf-8') as f:
         f.write(report_content)
     
-    print(f"✅ Reporte de éxito guardado en: {results_dir}/SUCCESS_REPORT.txt")
+    print(f"Reporte de exito guardado en: {results_dir}/SUCCESS_REPORT.txt")
     print(report_content)
 
 if __name__ == "__main__":
     rescue_training_results()
     create_final_success_report()
     
-    print("\n" + "🎉" * 20)
-    print("🏆 FELICITACIONES - ENTRENAMIENTO EXITOSO 🏆")
-    print("🎉" * 20)
-    print("✅ 87.72% Accuracy - EXCELENTE RESULTADO")
-    print("✅ 87.38% F1-Score - MUY BUENA GENERALIZACIÓN") 
-    print("✅ Modelo listo para uso en producción")
-    print("✅ Resultados dignos de publicación científica")
-    print("\n🎯 ¡TU PROYECTO ES UN ÉXITO COMPLETO!")
+    print("\n" + "=" * 60)
+    print("FELICITACIONES - ENTRENAMIENTO EXITOSO")
+    print("=" * 60)
+    print("[EXCELLENT] 87.72% Accuracy - EXCELENTE RESULTADO")
+    print("[VERY GOOD] 87.38% F1-Score - MUY BUENA GENERALIZACION") 
+    print("[READY] Modelo listo para uso en produccion")
+    print("[PUBLISH] Resultados dignos de publicacion cientifica")
+    print("\n[SUCCESS] TU PROYECTO ES UN EXITO COMPLETO!")
