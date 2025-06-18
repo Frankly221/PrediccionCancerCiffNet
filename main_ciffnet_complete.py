@@ -1,772 +1,864 @@
 import torch
 import torch.nn as nn
+import torch.optim as optim
+from torch.cuda.amp import GradScaler, autocast
+from torch.optim.lr_scheduler import CosineAnnealingLR, ReduceLROnPlateau
 import numpy as np
-import matplotlib.pyplot as plt
-import seaborn as sns
-from sklearn.metrics import (
-    accuracy_score, precision_score, recall_score, f1_score,
-    confusion_matrix, classification_report, roc_curve, auc,
-    precision_recall_curve, average_precision_score,
-    cohen_kappa_score, matthews_corrcoef, balanced_accuracy_score,
-    roc_auc_score, brier_score_loss
-)
-from sklearn.calibration import calibration_curve
-from sklearn.manifold import TSNE
-import plotly.graph_objects as go
-import plotly.express as px
-from plotly.subplots import make_subplots
-import json
+import time
 import os
 from datetime import datetime
-import pandas as pd
+import json
+import argparse
+from tqdm import tqdm
 import warnings
 warnings.filterwarnings('ignore')
 
-class CiffNetMetrics:
+# Importar nuestros módulos
+from phase1_feature_extraction import create_phase1_extractor
+from phase2_cliff_detection_complete import create_phase2_complete_detector, CiffNetPhase2Loss
+from phase3_classification_complete import create_phase3_complete_classifier, CiffNetPhase3Loss
+from dataset_improved import create_improved_data_loaders
+from metrics_and_visualization import CiffNetMetrics, create_all_visualizations
+
+class CiffNetComplete(nn.Module):
     """
-    Clase completa para métricas y visualizaciones de CiffNet
-    Optimizada para papers científicos de dermatología IA
+    Modelo CiffNet COMPLETO - Integración de las 3 fases
+    Optimizado para RTX 3070 según paper original
     """
     
-    def __init__(self, num_classes=7, class_names=None, save_dir="results"):
+    def __init__(self, num_classes=7, cliff_threshold=0.15, backbone='efficientnet_b1'):
+        super(CiffNetComplete, self).__init__()
+        
         self.num_classes = num_classes
-        self.save_dir = save_dir
+        self.cliff_threshold = cliff_threshold
+        self.backbone = backbone
         
-        # Nombres de clases HAM10000
-        if class_names is None:
-            self.class_names = [
-                'MEL', 'NV', 'BCC', 'AK', 'BKL', 'DF', 'VASC'
-            ]
+        print(f"🔧 CIFFNET COMPLETE - Inicializando modelo integrado...")
+        print(f"   Backbone: {backbone}")
+        print(f"   Classes: {num_classes}")
+        print(f"   Cliff threshold: {cliff_threshold}")
+        
+        # ================================
+        # FASE 1: Feature Extraction
+        # ================================
+        self.phase1 = create_phase1_extractor()  # ✅ CORREGIDO - Sin argumentos
+        
+        # ================================
+        # FASE 2: Cliff Detection
+        # ================================
+        self.phase2 = create_phase2_complete_detector(
+            input_dim=256,
+            cliff_threshold=cliff_threshold,
+            num_classes=num_classes
+        )
+        
+        # ================================
+        # FASE 3: Classification
+        # ================================
+        self.phase3 = create_phase3_complete_classifier(
+            input_dim=256,
+            num_classes=num_classes,
+            cliff_threshold=cliff_threshold
+        )
+        
+        # Loss functions
+        self.phase2_loss = CiffNetPhase2Loss(alpha=1.0, beta=0.5, gamma=0.3, num_classes=num_classes)
+        self.phase3_loss = CiffNetPhase3Loss(num_classes=num_classes, alpha=1.0, beta=0.3, gamma=0.2)
+        
+        print(f"✅ CiffNet Complete creado:")
+        total_params = sum(p.numel() for p in self.parameters())
+        trainable_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        print(f"   Total parameters: {total_params:,}")
+        print(f"   Trainable parameters: {trainable_params:,}")
+    
+    def forward(self, images, targets=None, return_all=False):
+        """
+        Forward pass completo: Imagen → Predicción final
+        """
+        batch_size = images.size(0)
+        
+        # ================================
+        # FASE 1: Feature Extraction
+        # ================================
+        with autocast():
+            phase1_outputs = self.phase1(images)
+            features = phase1_outputs['fused_features']  # [B, 256]
+        
+        # ================================
+        # FASE 2: Cliff Detection
+        # ================================
+        with autocast():
+            phase2_outputs = self.phase2(features)
+            enhanced_features = phase2_outputs['enhanced_features']  # [B, 256]
+        
+        # ================================
+        # FASE 3: Classification
+        # ================================
+        with autocast():
+            phase3_outputs = self.phase3(phase2_outputs, return_all=return_all)
+            final_predictions = phase3_outputs['predictions']  # [B]
+            final_logits = phase3_outputs['logits']  # [B, num_classes]
+            final_probs = phase3_outputs['probabilities']  # [B, num_classes]
+        
+        # Resultado principal
+        result = {
+            'logits': final_logits,
+            'probabilities': final_probs,
+            'predictions': final_predictions,
+            'confidence': phase3_outputs['confidence'],
+            'cliff_score': phase2_outputs['cliff_score'],
+            'cliff_mask': phase2_outputs['cliff_mask']
+        }
+        
+        # Información detallada si se requiere
+        if return_all:
+            result.update({
+                'phase1_outputs': phase1_outputs,
+                'phase2_outputs': phase2_outputs,
+                'phase3_outputs': phase3_outputs
+            })
+        
+        return result
+    
+    def compute_loss(self, outputs, targets):
+        """
+        Compute loss combinado de las 3 fases
+        """
+        # Extract outputs
+        phase2_outputs = outputs.get('phase2_outputs', {})
+        phase3_outputs = outputs.get('phase3_outputs', {})
+        
+        total_loss = 0.0
+        loss_breakdown = {}
+        
+        # Phase 2 loss (si hay outputs disponibles)
+        if phase2_outputs:
+            try:
+                phase2_loss_dict = self.phase2_loss(phase2_outputs, targets)
+                phase2_total = phase2_loss_dict['total_loss']
+                total_loss += 0.3 * phase2_total  # Peso 30% para fase 2
+                loss_breakdown['phase2'] = phase2_loss_dict
+            except Exception as e:
+                print(f"⚠️ Warning computing Phase 2 loss: {e}")
+        
+        # Phase 3 loss (principal)
+        if phase3_outputs:
+            try:
+                phase3_loss_dict = self.phase3_loss(phase3_outputs, targets)
+                phase3_total = phase3_loss_dict['total_loss']
+                total_loss += 1.0 * phase3_total  # Peso 100% para fase 3
+                loss_breakdown['phase3'] = phase3_loss_dict
+            except Exception as e:
+                print(f"⚠️ Warning computing Phase 3 loss: {e}")
+                # Fallback: usar CrossEntropy simple
+                ce_loss = nn.CrossEntropyLoss()
+                phase3_total = ce_loss(outputs['logits'], targets)
+                total_loss += phase3_total
+                loss_breakdown['phase3'] = {'total_loss': phase3_total}
+        
+        return total_loss, loss_breakdown
+
+class CiffNetTrainer:
+    """
+    Entrenador optimizado para CiffNet con entrenamiento progresivo
+    """
+    
+    def __init__(self, model, train_loader, val_loader, device, config):
+        self.model = model
+        self.train_loader = train_loader
+        self.val_loader = val_loader
+        self.device = device
+        self.config = config
+        
+        # Optimización RTX 3070
+        self.scaler = GradScaler() if config['mixed_precision'] else None
+        
+        # Optimizer
+        self.optimizer = optim.AdamW(
+            model.parameters(),
+            lr=config['learning_rate'],
+            weight_decay=config['weight_decay'],
+            betas=(0.9, 0.999)
+        )
+        
+        # Scheduler
+        if config['scheduler'] == 'cosine':
+            self.scheduler = CosineAnnealingLR(
+                self.optimizer, 
+                T_max=config['epochs'],
+                eta_min=config['learning_rate'] * 0.01
+            )
         else:
-            self.class_names = class_names
+            self.scheduler = ReduceLROnPlateau(
+                self.optimizer,
+                mode='max',
+                factor=0.5,
+                patience=10,
+                verbose=True
+            )
         
-        # Crear directorios
-        self._create_directories()
+        # Métricas
+        self.metrics_calc = CiffNetMetrics(
+            num_classes=config['num_classes'],
+            save_dir=config['save_dir']
+        )
         
-        print(f"📊 CiffNet Metrics inicializado:")
-        print(f"   Classes: {self.num_classes}")
-        print(f"   Save dir: {self.save_dir}")
-        print(f"   Class names: {self.class_names}")
+        # Historia de entrenamiento
+        self.history = {
+            'train_loss': [], 'val_loss': [],
+            'train_acc': [], 'val_acc': [],
+            'train_f1': [], 'val_f1': [],
+            'learning_rate': []
+        }
+        
+        # Best metrics tracking
+        self.best_val_acc = 0.0
+        self.best_val_f1 = 0.0
+        self.best_epoch = 0
+        
+        print(f"✅ CiffNet Trainer inicializado:")
+        print(f"   Optimizer: AdamW")
+        print(f"   Scheduler: {config['scheduler']}")
+        print(f"   Mixed precision: {config['mixed_precision']}")
+        print(f"   Device: {device}")
     
-    def _create_directories(self):
-        """Crear directorios para guardar resultados"""
-        dirs = ['models', 'metrics', 'visualizations', 'analysis']
-        for dir_name in dirs:
-            os.makedirs(f"{self.save_dir}/{dir_name}", exist_ok=True)
+    def train_epoch(self, epoch):
+        """
+        Entrenar una época
+        """
+        self.model.train()
+        
+        running_loss = 0.0
+        correct_predictions = 0
+        total_predictions = 0
+        all_targets = []
+        all_predictions = []
+        
+        pbar = tqdm(self.train_loader, desc=f"Epoch {epoch+1}/{self.config['epochs']}")
+        
+        for batch_idx, (images, targets) in enumerate(pbar):
+            images = images.to(self.device, memory_format=torch.channels_last if self.config.get('channels_last', False) else torch.contiguous_format)
+            targets = targets.to(self.device)
+            
+            # Forward pass
+            if self.scaler:
+                with autocast():
+                    outputs = self.model(images, targets, return_all=True)
+                    loss, _ = self.model.compute_loss(outputs, targets)
+            else:
+                outputs = self.model(images, targets, return_all=True)
+                loss, _ = self.model.compute_loss(outputs, targets)
+            
+            # Backward pass
+            self.optimizer.zero_grad()
+            
+            if self.scaler:
+                self.scaler.scale(loss).backward()
+                
+                # Gradient accumulation
+                if (batch_idx + 1) % self.config.get('gradient_accumulation_steps', 1) == 0:
+                    self.scaler.step(self.optimizer)
+                    self.scaler.update()
+            else:
+                loss.backward()
+                if (batch_idx + 1) % self.config.get('gradient_accumulation_steps', 1) == 0:
+                    self.optimizer.step()
+            
+            # Estadísticas
+            running_loss += loss.item()
+            predictions = outputs['predictions'].cpu()
+            targets_cpu = targets.cpu()
+            
+            correct_predictions += (predictions == targets_cpu).sum().item()
+            total_predictions += targets.size(0)
+            
+            all_targets.extend(targets_cpu.numpy())
+            all_predictions.extend(predictions.numpy())
+            
+            # Update progress bar
+            current_acc = correct_predictions / total_predictions
+            pbar.set_postfix({
+                'Loss': f"{running_loss/(batch_idx+1):.4f}",
+                'Acc': f"{current_acc:.4f}"
+            })
+        
+        # Métricas de época
+        epoch_loss = running_loss / len(self.train_loader)
+        epoch_acc = correct_predictions / total_predictions
+        
+        # F1 score
+        from sklearn.metrics import f1_score
+        epoch_f1 = f1_score(all_targets, all_predictions, average='weighted', zero_division=0)
+        
+        return epoch_loss, epoch_acc, epoch_f1
     
-    def compute_basic_metrics(self, y_true, y_pred, y_probs=None):
+    def validate_epoch(self, epoch):
         """
-        Métricas básicas de clasificación
+        Validar una época
         """
-        # Convertir a numpy si es tensor
-        if torch.is_tensor(y_true):
-            y_true = y_true.cpu().numpy()
-        if torch.is_tensor(y_pred):
-            y_pred = y_pred.cpu().numpy()
-        if torch.is_tensor(y_probs):
-            y_probs = y_probs.cpu().numpy()
+        self.model.eval()
+        
+        running_loss = 0.0
+        correct_predictions = 0
+        total_predictions = 0
+        all_targets = []
+        all_predictions = []
+        all_probs = []
+        all_cliff_scores = []
+        all_confidences = []
+        
+        with torch.no_grad():
+            for images, targets in tqdm(self.val_loader, desc="Validating"):
+                images = images.to(self.device, memory_format=torch.channels_last if self.config.get('channels_last', False) else torch.contiguous_format)
+                targets = targets.to(self.device)
+                
+                # Forward pass
+                if self.scaler:
+                    with autocast():
+                        outputs = self.model(images, targets, return_all=True)
+                        loss, _ = self.model.compute_loss(outputs, targets)
+                else:
+                    outputs = self.model(images, targets, return_all=True)
+                    loss, _ = self.model.compute_loss(outputs, targets)
+                
+                # Estadísticas
+                running_loss += loss.item()
+                predictions = outputs['predictions'].cpu()
+                probs = outputs['probabilities'].cpu()
+                cliff_scores = outputs['cliff_score'].cpu()
+                confidences = outputs['confidence'].cpu()
+                targets_cpu = targets.cpu()
+                
+                correct_predictions += (predictions == targets_cpu).sum().item()
+                total_predictions += targets.size(0)
+                
+                all_targets.extend(targets_cpu.numpy())
+                all_predictions.extend(predictions.numpy())
+                all_probs.append(probs.numpy())
+                all_cliff_scores.extend(cliff_scores.numpy())
+                all_confidences.extend(confidences.numpy())
+        
+        # Métricas de época
+        epoch_loss = running_loss / len(self.val_loader)
+        epoch_acc = correct_predictions / total_predictions
+        
+        # Concatenar arrays
+        all_probs = np.vstack(all_probs)
+        all_targets = np.array(all_targets)
+        all_predictions = np.array(all_predictions)
+        all_cliff_scores = np.array(all_cliff_scores).flatten()
+        all_confidences = np.array(all_confidences).flatten()
+        
+        # F1 score
+        from sklearn.metrics import f1_score
+        epoch_f1 = f1_score(all_targets, all_predictions, average='weighted', zero_division=0)
+        
+        # Métricas detalladas en epoch final o mejores métricas
+        if epoch >= self.config['epochs'] - 1 or epoch_f1 > self.best_val_f1:
+            detailed_metrics = self._compute_detailed_metrics(
+                all_targets, all_predictions, all_probs, 
+                all_cliff_scores, all_confidences, epoch
+            )
+        else:
+            detailed_metrics = None
+        
+        return epoch_loss, epoch_acc, epoch_f1, detailed_metrics
+    
+    def _compute_detailed_metrics(self, y_true, y_pred, y_probs, cliff_scores, confidences, epoch):
+        """
+        Compute métricas detalladas y generar visualizaciones
+        """
+        print(f"\n📊 Generando métricas detalladas para epoch {epoch+1}...")
         
         # Métricas básicas
-        accuracy = accuracy_score(y_true, y_pred)
-        precision_macro = precision_score(y_true, y_pred, average='macro', zero_division=0)
-        recall_macro = recall_score(y_true, y_pred, average='macro', zero_division=0)
-        f1_macro = f1_score(y_true, y_pred, average='macro', zero_division=0)
+        basic_metrics = self.metrics_calc.compute_basic_metrics(y_true, y_pred, y_probs)
         
-        precision_weighted = precision_score(y_true, y_pred, average='weighted', zero_division=0)
-        recall_weighted = recall_score(y_true, y_pred, average='weighted', zero_division=0)
-        f1_weighted = f1_score(y_true, y_pred, average='weighted', zero_division=0)
+        # Métricas cliff
+        cliff_metrics = self.metrics_calc.compute_cliff_metrics(
+            cliff_scores, None, y_true, y_pred, self.config['cliff_threshold']
+        )
         
-        # Métricas adicionales
-        kappa = cohen_kappa_score(y_true, y_pred)
-        mcc = matthews_corrcoef(y_true, y_pred)
-        balanced_acc = balanced_accuracy_score(y_true, y_pred)
+        # Métricas confianza
+        confidence_metrics = self.metrics_calc.compute_confidence_metrics(
+            confidences, y_true, y_pred
+        )
         
-        metrics = {
-            'accuracy': float(accuracy),
-            'precision_macro': float(precision_macro),
-            'recall_macro': float(recall_macro),
-            'f1_macro': float(f1_macro),
-            'precision_weighted': float(precision_weighted),
-            'recall_weighted': float(recall_weighted),
-            'f1_weighted': float(f1_weighted),
-            'cohen_kappa': float(kappa),
-            'matthews_corrcoef': float(mcc),
-            'balanced_accuracy': float(balanced_acc)
+        # Combinar métricas
+        all_metrics = {
+            'epoch': epoch + 1,
+            'basic_metrics': basic_metrics,
+            'cliff_metrics': cliff_metrics,
+            'confidence_metrics': confidence_metrics
         }
         
-        # Métricas por clase
-        precision_per_class = precision_score(y_true, y_pred, average=None, zero_division=0)
-        recall_per_class = recall_score(y_true, y_pred, average=None, zero_division=0)
-        f1_per_class = f1_score(y_true, y_pred, average=None, zero_division=0)
+        # Generar visualizaciones
+        create_all_visualizations(
+            self.metrics_calc, y_true, y_pred, y_probs,
+            cliff_scores, confidences, self.history
+        )
         
-        class_metrics = {}
-        for i, class_name in enumerate(self.class_names):
-            class_metrics[class_name] = {
-                'precision': float(precision_per_class[i]),
-                'recall': float(recall_per_class[i]),
-                'f1': float(f1_per_class[i])
-            }
+        # Guardar métricas
+        self.metrics_calc.save_metrics_json(all_metrics, f"metrics_epoch_{epoch+1}.json")
+        self.metrics_calc.generate_classification_report(y_true, y_pred, f"report_epoch_{epoch+1}.txt")
         
-        metrics['per_class'] = class_metrics
-        
-        # Métricas probabilísticas si disponibles
-        if y_probs is not None:
-            try:
-                # AUC multiclass
-                auc_macro = roc_auc_score(y_true, y_probs, average='macro', multi_class='ovr')
-                auc_weighted = roc_auc_score(y_true, y_probs, average='weighted', multi_class='ovr')
-                
-                # Brier score
-                y_true_onehot = np.eye(self.num_classes)[y_true]
-                brier = brier_score_loss(y_true_onehot.ravel(), y_probs.ravel())
-                
-                metrics.update({
-                    'auc_macro': float(auc_macro),
-                    'auc_weighted': float(auc_weighted),
-                    'brier_score': float(brier)
-                })
-            except Exception as e:
-                print(f"⚠️ Warning computing probabilistic metrics: {e}")
-        
-        return metrics
+        return all_metrics
     
-    def compute_cliff_metrics(self, cliff_scores, cliff_targets, y_true, y_pred, threshold=0.15):
+    def train(self):
         """
-        Métricas específicas para cliff detection
+        Entrenamiento completo
         """
-        if torch.is_tensor(cliff_scores):
-            cliff_scores = cliff_scores.cpu().numpy()
-        if torch.is_tensor(cliff_targets):
-            cliff_targets = cliff_targets.cpu().numpy()
-        if torch.is_tensor(y_true):
-            y_true = y_true.cpu().numpy()
-        if torch.is_tensor(y_pred):
-            y_pred = y_pred.cpu().numpy()
+        print(f"🚀 Iniciando entrenamiento CiffNet Complete...")
+        print(f"   Epochs: {self.config['epochs']}")
+        print(f"   Batch size: {self.config['batch_size']}")
+        print(f"   Learning rate: {self.config['learning_rate']}")
         
-        # Cliff detection como clasificación binaria
-        cliff_pred = (cliff_scores > threshold).astype(int)
+        start_time = time.time()
         
-        # Si no hay cliff_targets, usar accuracy de predicción como proxy
-        if cliff_targets is None:
-            cliff_targets = (y_true != y_pred).astype(int)  # Muestras mal clasificadas como cliff
-        
-        # Métricas cliff detection
-        cliff_accuracy = accuracy_score(cliff_targets, cliff_pred)
-        cliff_precision = precision_score(cliff_targets, cliff_pred, zero_division=0)
-        cliff_recall = recall_score(cliff_targets, cliff_pred, zero_division=0)
-        cliff_f1 = f1_score(cliff_targets, cliff_pred, zero_division=0)
-        
-        # Análisis por grupos
-        cliff_mask = cliff_pred.astype(bool)
-        non_cliff_mask = ~cliff_mask
-        
-        # Performance en cliff vs non-cliff
-        if cliff_mask.sum() > 0:
-            cliff_accuracy_subset = accuracy_score(y_true[cliff_mask], y_pred[cliff_mask])
-        else:
-            cliff_accuracy_subset = 0.0
+        for epoch in range(self.config['epochs']):
+            epoch_start = time.time()
             
-        if non_cliff_mask.sum() > 0:
-            non_cliff_accuracy_subset = accuracy_score(y_true[non_cliff_mask], y_pred[non_cliff_mask])
-        else:
-            non_cliff_accuracy_subset = 0.0
-        
-        # Estadísticas cliff scores
-        cliff_stats = {
-            'mean': float(np.mean(cliff_scores)),
-            'std': float(np.std(cliff_scores)),
-            'min': float(np.min(cliff_scores)),
-            'max': float(np.max(cliff_scores)),
-            'median': float(np.median(cliff_scores)),
-            'q25': float(np.percentile(cliff_scores, 25)),
-            'q75': float(np.percentile(cliff_scores, 75))
-        }
-        
-        cliff_metrics = {
-            'cliff_detection_accuracy': float(cliff_accuracy),
-            'cliff_detection_precision': float(cliff_precision),
-            'cliff_detection_recall': float(cliff_recall),
-            'cliff_detection_f1': float(cliff_f1),
-            'cliff_ratio': float(cliff_mask.mean()),
-            'performance_on_cliff': float(cliff_accuracy_subset),
-            'performance_on_non_cliff': float(non_cliff_accuracy_subset),
-            'cliff_score_stats': cliff_stats,
-            'samples_identified_as_cliff': int(cliff_mask.sum()),
-            'total_samples': len(cliff_scores)
-        }
-        
-        return cliff_metrics
-    
-    def compute_confidence_metrics(self, confidences, y_true, y_pred, n_bins=10):
-        """
-        Métricas de calibración y confianza
-        """
-        if torch.is_tensor(confidences):
-            confidences = confidences.cpu().numpy()
-        if torch.is_tensor(y_true):
-            y_true = y_true.cpu().numpy()
-        if torch.is_tensor(y_pred):
-            y_pred = y_pred.cpu().numpy()
-        
-        # Accuracy per prediction
-        correct = (y_true == y_pred).astype(int)
-        
-        # Expected Calibration Error (ECE)
-        bin_boundaries = np.linspace(0, 1, n_bins + 1)
-        bin_lowers = bin_boundaries[:-1]
-        bin_uppers = bin_boundaries[1:]
-        
-        ece = 0
-        for bin_lower, bin_upper in zip(bin_lowers, bin_uppers):
-            in_bin = (confidences > bin_lower) & (confidences <= bin_upper)
-            prop_in_bin = in_bin.mean()
+            # Training
+            train_loss, train_acc, train_f1 = self.train_epoch(epoch)
             
-            if prop_in_bin > 0:
-                accuracy_in_bin = correct[in_bin].mean()
-                avg_confidence_in_bin = confidences[in_bin].mean()
-                ece += np.abs(avg_confidence_in_bin - accuracy_in_bin) * prop_in_bin
+            # Validation
+            val_loss, val_acc, val_f1, detailed_metrics = self.validate_epoch(epoch)
+            
+            # Update history
+            self.history['train_loss'].append(train_loss)
+            self.history['val_loss'].append(val_loss)
+            self.history['train_acc'].append(train_acc)
+            self.history['val_acc'].append(val_acc)
+            self.history['train_f1'].append(train_f1)
+            self.history['val_f1'].append(val_f1)
+            self.history['learning_rate'].append(self.optimizer.param_groups[0]['lr'])
+            
+            # Scheduler step
+            if isinstance(self.scheduler, ReduceLROnPlateau):
+                self.scheduler.step(val_f1)
+            else:
+                self.scheduler.step()
+            
+            # Save best model
+            if val_f1 > self.best_val_f1:
+                self.best_val_f1 = val_f1
+                self.best_val_acc = val_acc
+                self.best_epoch = epoch
+                self._save_checkpoint(epoch, 'best')
+            
+            # Regular checkpoint
+            if (epoch + 1) % 10 == 0:
+                self._save_checkpoint(epoch, f'epoch_{epoch+1}')
+            
+            epoch_time = time.time() - epoch_start
+            
+            print(f"\n📊 Epoch {epoch+1}/{self.config['epochs']} Summary:")
+            print(f"   Train - Loss: {train_loss:.4f}, Acc: {train_acc:.4f}, F1: {train_f1:.4f}")
+            print(f"   Val   - Loss: {val_loss:.4f}, Acc: {val_acc:.4f}, F1: {val_f1:.4f}")
+            print(f"   Time: {epoch_time:.1f}s, LR: {self.optimizer.param_groups[0]['lr']:.2e}")
+            
+            if detailed_metrics:
+                cliff_ratio = detailed_metrics['cliff_metrics']['cliff_ratio']
+                cliff_perf = detailed_metrics['cliff_metrics']['performance_on_cliff']
+                print(f"   Cliff: {cliff_ratio*100:.1f}% samples, {cliff_perf:.4f} accuracy on cliff")
         
-        # Estadísticas confianza
-        conf_stats = {
-            'mean': float(np.mean(confidences)),
-            'std': float(np.std(confidences)),
-            'min': float(np.min(confidences)),
-            'max': float(np.max(confidences)),
-            'median': float(np.median(confidences))
-        }
+        total_time = time.time() - start_time
         
-        # Correlación confianza-accuracy
-        try:
-            conf_accuracy_corr = np.corrcoef(confidences, correct)[0, 1]
-        except:
-            conf_accuracy_corr = 0.0
+        print(f"\n🎯 ENTRENAMIENTO COMPLETADO!")
+        print(f"   Tiempo total: {total_time/60:.1f} minutos")
+        print(f"   Mejor época: {self.best_epoch+1}")
+        print(f"   Mejor Val Acc: {self.best_val_acc:.4f}")
+        print(f"   Mejor Val F1: {self.best_val_f1:.4f}")
         
-        confidence_metrics = {
-            'expected_calibration_error': float(ece),
-            'confidence_stats': conf_stats,
-            'confidence_accuracy_correlation': float(conf_accuracy_corr),
-            'n_bins': n_bins
-        }
+        # Guardar historia
+        history_path = f"{self.config['save_dir']}/metrics/training_history.json"
+        with open(history_path, 'w') as f:
+            json.dump(self.history, f, indent=4)
         
-        return confidence_metrics
+        return self.history
     
-    def plot_confusion_matrix(self, y_true, y_pred, normalize=True, save_name="confusion_matrix"):
+    def _save_checkpoint(self, epoch, name):
         """
-        Plot confusion matrix de alta calidad
+        Guardar checkpoint del modelo
         """
-        if torch.is_tensor(y_true):
-            y_true = y_true.cpu().numpy()
-        if torch.is_tensor(y_pred):
-            y_pred = y_pred.cpu().numpy()
+        checkpoint = {
+            'epoch': epoch,
+            'model_state_dict': self.model.state_dict(),
+            'optimizer_state_dict': self.optimizer.state_dict(),
+            'scheduler_state_dict': self.scheduler.state_dict(),
+            'best_val_f1': self.best_val_f1,
+            'best_val_acc': self.best_val_acc,
+            'config': self.config,
+            'history': self.history
+        }
         
-        # Calcular confusion matrix
-        cm = confusion_matrix(y_true, y_pred)
+        save_path = f"{self.config['save_dir']}/models/ciffnet_{name}.pth"
+        torch.save(checkpoint, save_path)
+        print(f"💾 Checkpoint guardado: {save_path}")
+
+def get_optimal_config():
+    """
+    Configuración óptima para RTX 3070
+    """
+    return {
+        # Dataset
+        'num_classes': 7,
+        'batch_size': 32,
+        'num_workers': 8,
+        'pin_memory': True,
         
-        if normalize:
-            cm_norm = cm.astype('float') / cm.sum(axis=1)[:, np.newaxis]
-            cm_display = cm_norm
-            fmt = '.2f'
-            title = 'Normalized Confusion Matrix'
+        # Training
+        'epochs': 100,
+        'learning_rate': 1e-4,
+        'weight_decay': 1e-4,
+        'gradient_accumulation_steps': 2,
+        
+        # Optimization
+        'mixed_precision': True,
+        'channels_last': True,
+        'scheduler': 'cosine',
+        
+        # CiffNet specific
+        'cliff_threshold': 0.15,
+        'backbone': 'efficientnet_b1',
+        
+        # Output
+        'save_dir': 'results',
+        'save_every': 10
+    }
+
+def main():
+    """
+    Función principal - Orquestador completo
+    """
+    print("🎯 CIFFNET COMPLETE - PIPELINE COMPLETO")
+    print("=" * 60)
+    
+    # Configuración
+    config = get_optimal_config()
+    
+    # Device setup
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f"🔧 Device: {device}")
+    
+    if torch.cuda.is_available():
+        print(f"   GPU: {torch.cuda.get_device_name()}")
+        print(f"   VRAM: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
+    
+    # Crear directorios
+    os.makedirs(config['save_dir'], exist_ok=True)
+    for subdir in ['models', 'metrics', 'visualizations', 'analysis']:
+        os.makedirs(f"{config['save_dir']}/{subdir}", exist_ok=True)
+    
+    # ================================
+    # CARGAR DATASET
+    # ================================
+    print("\n📁 Cargando dataset HAM10000...")
+    
+    csv_file = "datasetHam10000/HAM10000_metadata.csv"
+    image_folders = [
+        "datasetHam10000/HAM10000_images_part_1",
+        "datasetHam10000/HAM10000_images_part_2"
+    ]
+    
+    # ✅ LÍNEA CORREGIDA - Sin argumentos problemáticos
+    train_loader, val_loader, label_encoder, class_weights = create_improved_data_loaders(
+        csv_file=csv_file,
+        image_folders=image_folders,
+        batch_size=config['batch_size']
+    )
+    
+    print(f"✅ Dataset cargado:")
+    print(f"   Train batches: {len(train_loader)}")
+    print(f"   Val batches: {len(val_loader)}")
+    print(f"   Classes: {label_encoder.classes_}")
+    
+    # ================================
+    # CREAR MODELO
+    # ================================
+    print("\n🏗️ Creando modelo CiffNet Complete...")
+    
+    model = CiffNetComplete(
+        num_classes=config['num_classes'],
+        cliff_threshold=config['cliff_threshold'],
+        backbone=config['backbone']
+    )
+    
+    model = model.to(device)
+    
+    # Optimizaciones memoria
+    if config['channels_last']:
+        model = model.to(memory_format=torch.channels_last)
+    
+    print(f"✅ Modelo creado y movido a {device}")
+    
+    # ================================
+    # ENTRENAMIENTO
+    # ================================
+    print("\n🏃 Iniciando entrenamiento...")
+    
+    trainer = CiffNetTrainer(
+        model=model,
+        train_loader=train_loader,
+        val_loader=val_loader,
+        device=device,
+        config=config
+    )
+    
+    # Entrenar modelo
+    history = trainer.train()
+    
+    # ================================
+    # EVALUACIÓN FINAL
+    # ================================
+    print("\n🧪 Evaluación final en conjunto de validación...")
+    
+    # Cargar mejor modelo
+    best_model_path = f"{config['save_dir']}/models/ciffnet_best.pth"
+    if os.path.exists(best_model_path):
+        checkpoint = torch.load(best_model_path, map_location=device)
+        model.load_state_dict(checkpoint['model_state_dict'])
+        print(f"✅ Mejor modelo cargado desde epoch {checkpoint['epoch']+1}")
+    
+    # Evaluación final
+    model.eval()
+    all_targets = []
+    all_predictions = []
+    all_probs = []
+    all_cliff_scores = []
+    all_confidences = []
+    
+    with torch.no_grad():
+        for images, targets in tqdm(val_loader, desc="Evaluación final"):
+            images = images.to(device, memory_format=torch.channels_last if config['channels_last'] else torch.contiguous_format)
+            targets = targets.to(device)
+            
+            outputs = model(images, return_all=True)
+            
+            all_targets.extend(targets.cpu().numpy())
+            all_predictions.extend(outputs['predictions'].cpu().numpy())
+            all_probs.append(outputs['probabilities'].cpu().numpy())
+            all_cliff_scores.extend(outputs['cliff_score'].cpu().numpy())
+            all_confidences.extend(outputs['confidence'].cpu().numpy())
+    
+    # Procesar resultados
+    all_targets = np.array(all_targets)
+    all_predictions = np.array(all_predictions)
+    all_probs = np.vstack(all_probs)
+    all_cliff_scores = np.array(all_cliff_scores).flatten()
+    all_confidences = np.array(all_confidences).flatten()
+    
+    # ================================
+    # MÉTRICAS FINALES
+    # ================================
+    print("\n📊 Generando métricas finales...")
+    
+    metrics_calc = CiffNetMetrics(num_classes=config['num_classes'], save_dir=config['save_dir'])
+    
+    # Métricas completas
+    final_basic = metrics_calc.compute_basic_metrics(all_targets, all_predictions, all_probs)
+    final_cliff = metrics_calc.compute_cliff_metrics(all_cliff_scores, None, all_targets, all_predictions)
+    final_confidence = metrics_calc.compute_confidence_metrics(all_confidences, all_targets, all_predictions)
+    
+    final_metrics = {
+        'timestamp': datetime.now().isoformat(),
+        'config': config,
+        'basic_metrics': final_basic,
+        'cliff_metrics': final_cliff,
+        'confidence_metrics': final_confidence,
+        'training_history': history
+    }
+    
+    # Guardar métricas finales
+    metrics_calc.save_metrics_json(final_metrics, "FINAL_METRICS.json")
+    metrics_calc.generate_classification_report(all_targets, all_predictions, "FINAL_REPORT.txt")
+    
+    # Visualizaciones finales
+    create_all_visualizations(
+        metrics_calc, all_targets, all_predictions, all_probs,
+        all_cliff_scores, all_confidences, history
+    )
+    
+    # ================================
+    # REPORTE FINAL
+    # ================================
+    print("\n" + "="*60)
+    print("🎯 CIFFNET COMPLETE - RESULTADOS FINALES")
+    print("="*60)
+    print(f"📊 MÉTRICAS PRINCIPALES:")
+    print(f"   Accuracy: {final_basic['accuracy']:.4f}")
+    print(f"   F1-Score (macro): {final_basic['f1_macro']:.4f}")
+    print(f"   F1-Score (weighted): {final_basic['f1_weighted']:.4f}")
+    print(f"   AUC-ROC (macro): {final_basic.get('auc_macro', 'N/A')}")
+    print(f"   Cohen's Kappa: {final_basic['cohen_kappa']:.4f}")
+    print(f"   Matthews Correlation: {final_basic['matthews_corrcoef']:.4f}")
+    
+    print(f"\n🔬 CLIFF DETECTION:")
+    print(f"   Cliff ratio: {final_cliff['cliff_ratio']*100:.1f}%")
+    print(f"   Performance on cliff: {final_cliff['performance_on_cliff']:.4f}")
+    print(f"   Performance on non-cliff: {final_cliff['performance_on_non_cliff']:.4f}")
+    print(f"   Cliff detection F1: {final_cliff['cliff_detection_f1']:.4f}")
+    
+    print(f"\n📈 CONFIANZA & CALIBRACIÓN:")
+    print(f"   Expected Calibration Error: {final_confidence['expected_calibration_error']:.4f}")
+    print(f"   Confidence mean: {final_confidence['confidence_stats']['mean']:.4f}")
+    print(f"   Confidence-accuracy correlation: {final_confidence['confidence_accuracy_correlation']:.4f}")
+    
+    print(f"\n💾 ARCHIVOS GENERADOS:")
+    print(f"   📂 {config['save_dir']}/models/ - Modelos guardados")
+    print(f"   📊 {config['save_dir']}/metrics/ - Métricas detalladas")
+    print(f"   📈 {config['save_dir']}/visualizations/ - Gráficos (300 DPI)")
+    print(f"   📄 {config['save_dir']}/analysis/ - Análisis adicionales")
+    
+    print(f"\n✅ PIPELINE COMPLETO FINALIZADO")
+    print("="*60)
+
+if __name__ == "__main__":
+    # Parser para argumentos opcionales
+    parser = argparse.ArgumentParser(description='CiffNet Complete Training Pipeline')
+    parser.add_argument('--epochs', type=int, default=100, help='Number of epochs')
+    parser.add_argument('--batch_size', type=int, default=32, help='Batch size')
+    parser.add_argument('--lr', type=float, default=1e-4, help='Learning rate')
+    parser.add_argument('--save_dir', type=str, default='results', help='Save directory')
+    
+    args = parser.parse_args()
+    
+    # Actualizar config con argumentos
+    config = get_optimal_config()
+    config.update({
+        'epochs': args.epochs,
+        'batch_size': args.batch_size,
+        'learning_rate': args.lr,
+        'save_dir': args.save_dir
+    })
+    
+    # Ejecutar pipeline completo
+    main()
+
+def plot_training_curves(self, history):
+    """
+    Plot training curves - MÉTODO FALTANTE AGREGADO
+    """
+    try:
+        print("📊 Generando curvas de entrenamiento...")
+        
+        if not history or len(history) == 0:
+            print("⚠️ No hay historia de entrenamiento disponible")
+            return
+        
+        # Verificar qué métricas están disponibles
+        available_metrics = list(history.keys())
+        print(f"📋 Métricas disponibles: {available_metrics}")
+        
+        # Crear subplots
+        fig, axes = plt.subplots(2, 2, figsize=(15, 12))
+        fig.suptitle('Training History', fontsize=16, fontweight='bold')
+        
+        # 1. Loss curves
+        if 'train_loss' in history and 'val_loss' in history:
+            axes[0, 0].plot(history['train_loss'], label='Training Loss', color='blue')
+            axes[0, 0].plot(history['val_loss'], label='Validation Loss', color='red')
+            axes[0, 0].set_title('Loss Curves')
+            axes[0, 0].set_xlabel('Epoch')
+            axes[0, 0].set_ylabel('Loss')
+            axes[0, 0].legend()
+            axes[0, 0].grid(True, alpha=0.3)
         else:
-            cm_display = cm
-            fmt = 'd'
-            title = 'Confusion Matrix'
+            axes[0, 0].text(0.5, 0.5, 'Loss data not available', 
+                          ha='center', va='center', transform=axes[0, 0].transAxes)
         
-        # Plot
-        plt.figure(figsize=(10, 8))
-        sns.heatmap(cm_display, 
-                   annot=True, 
-                   fmt=fmt, 
-                   cmap='Blues',
-                   xticklabels=self.class_names,
-                   yticklabels=self.class_names,
-                   cbar_kws={'label': 'Proportion' if normalize else 'Count'})
+        # 2. Accuracy curves
+        if 'train_acc' in history and 'val_acc' in history:
+            axes[0, 1].plot(history['train_acc'], label='Training Accuracy', color='blue')
+            axes[0, 1].plot(history['val_acc'], label='Validation Accuracy', color='red')
+            axes[0, 1].set_title('Accuracy Curves')
+            axes[0, 1].set_xlabel('Epoch')
+            axes[0, 1].set_ylabel('Accuracy')
+            axes[0, 1].legend()
+            axes[0, 1].grid(True, alpha=0.3)
+        else:
+            axes[0, 1].text(0.5, 0.5, 'Accuracy data not available', 
+                          ha='center', va='center', transform=axes[0, 1].transAxes)
         
-        plt.title(title, fontsize=16, fontweight='bold')
-        plt.xlabel('Predicted Label', fontsize=14)
-        plt.ylabel('True Label', fontsize=14)
-        plt.xticks(rotation=45)
-        plt.yticks(rotation=0)
+        # 3. F1-Score curves
+        if 'train_f1' in history and 'val_f1' in history:
+            axes[1, 0].plot(history['train_f1'], label='Training F1', color='blue')
+            axes[1, 0].plot(history['val_f1'], label='Validation F1', color='red')
+            axes[1, 0].set_title('F1-Score Curves')
+            axes[1, 0].set_xlabel('Epoch')
+            axes[1, 0].set_ylabel('F1-Score')
+            axes[1, 0].legend()
+            axes[1, 0].grid(True, alpha=0.3)
+        else:
+            axes[1, 0].text(0.5, 0.5, 'F1 data not available', 
+                          ha='center', va='center', transform=axes[1, 0].transAxes)
+        
+        # 4. Learning Rate (si está disponible)
+        if 'learning_rate' in history:
+            axes[1, 1].plot(history['learning_rate'], label='Learning Rate', color='green')
+            axes[1, 1].set_title('Learning Rate Schedule')
+            axes[1, 1].set_xlabel('Epoch')
+            axes[1, 1].set_ylabel('Learning Rate')
+            axes[1, 1].legend()
+            axes[1, 1].grid(True, alpha=0.3)
+            axes[1, 1].set_yscale('log')
+        else:
+            # Mostrar mejor métrica disponible
+            best_metric_key = None
+            for key in ['val_acc', 'val_f1', 'train_acc', 'train_f1']:
+                if key in history:
+                    best_metric_key = key
+                    break
+            
+            if best_metric_key:
+                axes[1, 1].plot(history[best_metric_key], label=best_metric_key, color='purple')
+                axes[1, 1].set_title(f'Best Available Metric: {best_metric_key}')
+                axes[1, 1].set_xlabel('Epoch')
+                axes[1, 1].set_ylabel(best_metric_key)
+                axes[1, 1].legend()
+                axes[1, 1].grid(True, alpha=0.3)
+            else:
+                axes[1, 1].text(0.5, 0.5, 'No additional metrics available', 
+                              ha='center', va='center', transform=axes[1, 1].transAxes)
+        
+        # Ajustar layout
         plt.tight_layout()
         
         # Guardar
-        save_path = f"{self.save_dir}/visualizations/{save_name}.png"
+        save_path = f"{self.save_dir}/visualizations/training_curves.png"
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
         plt.close()
         
-        print(f"✅ Confusion matrix guardada: {save_path}")
-        return cm
-    
-    def plot_roc_curves(self, y_true, y_probs):
-        """
-        Plot ROC curves para cada clase - CORREGIDO para manejar NaN
-        """
+        print(f"✅ Training curves guardadas: {save_path}")
+        
+    except Exception as e:
+        print(f"❌ Error en plot_training_curves: {e}")
+        
+        # Fallback: plot simple
         try:
-            # ✅ VALIDACIÓN Y LIMPIEZA DE DATOS
-            print("🔍 Validando datos para ROC curves...")
+            plt.figure(figsize=(10, 6))
             
-            # Verificar y limpiar NaN en probabilidades
-            nan_mask = np.isnan(y_probs).any(axis=1)
-            if nan_mask.any():
-                print(f"⚠️ Encontrados {nan_mask.sum()} samples con NaN, eliminando...")
-                y_probs = y_probs[~nan_mask]
-                y_true = y_true[~nan_mask]
-            
-            # Verificar que no hay infinitos
-            inf_mask = np.isinf(y_probs).any(axis=1)
-            if inf_mask.any():
-                print(f"⚠️ Encontrados {inf_mask.sum()} samples con infinitos, eliminando...")
-                y_probs = y_probs[~inf_mask]
-                y_true = y_true[~inf_mask]
-            
-            # Verificar que las probabilidades están en rango válido [0,1]
-            if y_probs.min() < 0 or y_probs.max() > 1:
-                print(f"⚠️ Probabilidades fuera de rango [0,1], normalizando...")
-                # Aplicar softmax para normalizar
-                y_probs = np.exp(y_probs) / np.sum(np.exp(y_probs), axis=1, keepdims=True)
-            
-            # Verificar que tenemos datos suficientes
-            if len(y_true) < 10:
-                print(f"❌ Datos insuficientes después de limpieza ({len(y_true)} samples)")
-                return
-            
-            print(f"✅ Datos validados: {len(y_true)} samples, {y_probs.shape[1]} clases")
-            
-            # Binarizar labels para ROC multiclase
-            from sklearn.preprocessing import label_binarize
-            y_true_bin = label_binarize(y_true, classes=range(self.num_classes))
-            
-            # Si solo hay una clase, label_binarize devuelve array 1D
-            if y_true_bin.ndim == 1:
-                y_true_bin = y_true_bin.reshape(-1, 1)
-            
-            # Crear figura
-            plt.figure(figsize=(12, 10))
-            colors = plt.cm.Set3(np.linspace(0, 1, self.num_classes))
-            
-            # ROC para cada clase
-            roc_auc = {}
-            all_fpr = []
-            all_tpr = []
-            
-            for i, (color, class_name) in enumerate(zip(colors, self.class_names)):
-                # ✅ VALIDACIÓN ADICIONAL POR CLASE
-                if i >= y_probs.shape[1]:
-                    print(f"⚠️ Saltando clase {i}: índice fuera de rango")
-                    continue
-                    
-                # Verificar que la clase tiene samples
-                if i >= y_true_bin.shape[1]:
-                    print(f"⚠️ Saltando clase {i}: no hay datos binarizados")
-                    continue
+            # Plot cualquier métrica disponible
+            if history and len(history) > 0:
+                for key, values in history.items():
+                    if isinstance(values, list) and len(values) > 0:
+                        plt.plot(values, label=key)
                 
-                class_y_true = y_true_bin[:, i]
-                class_y_probs = y_probs[:, i]
-                
-                # Verificar NaN específicos de esta clase
-                class_nan_mask = np.isnan(class_y_probs) | np.isnan(class_y_true)
-                if class_nan_mask.any():
-                    print(f"⚠️ Clase {class_name}: {class_nan_mask.sum()} valores NaN, limpiando...")
-                    class_y_true = class_y_true[~class_nan_mask]
-                    class_y_probs = class_y_probs[~class_nan_mask]
-                
-                # Verificar que hay al menos dos clases (0 y 1) en y_true
-                if len(np.unique(class_y_true)) < 2:
-                    print(f"⚠️ Clase {class_name}: solo una clase presente, saltando ROC")
-                    continue
-                
-                try:
-                    # ✅ CÁLCULO SEGURO DE ROC
-                    from sklearn.metrics import roc_curve, auc
-                    fpr, tpr, _ = roc_curve(class_y_true, class_y_probs)
-                    roc_auc[i] = auc(fpr, tpr)
-                    
-                    # Plot individual
-                    plt.plot(fpr, tpr, color=color, lw=2,
-                            label=f'{class_name} (AUC = {roc_auc[i]:.3f})')
-                    
-                    all_fpr.append(fpr)
-                    all_tpr.append(tpr)
-                    
-                except Exception as e:
-                    print(f"⚠️ Error en ROC para clase {class_name}: {e}")
-                    continue
-            
-            # ROC curve promedio (micro-average)
-            try:
-                from sklearn.metrics import roc_curve, auc
-                fpr_micro, tpr_micro, _ = roc_curve(y_true_bin.ravel(), y_probs.ravel())
-                roc_auc_micro = auc(fpr_micro, tpr_micro)
-                
-                plt.plot(fpr_micro, tpr_micro,
-                        color='deeppink', linestyle=':', linewidth=4,
-                        label=f'Micro-average (AUC = {roc_auc_micro:.3f})')
-            except Exception as e:
-                print(f"⚠️ Error en micro-average ROC: {e}")
-            
-            # Línea diagonal (random classifier)
-            plt.plot([0, 1], [0, 1], 'k--', lw=2, label='Random Classifier')
-            
-            # Configuración del plot
-            plt.xlim([0.0, 1.0])
-            plt.ylim([0.0, 1.05])
-            plt.xlabel('False Positive Rate', fontsize=12)
-            plt.ylabel('True Positive Rate', fontsize=12)
-            plt.title('Receiver Operating Characteristic (ROC) Curves', fontsize=14, fontweight='bold')
-            plt.legend(loc="lower right", fontsize=10)
+            plt.title('Training History (Fallback)')
+            plt.xlabel('Epoch')
+            plt.ylabel('Metric Value')
+            plt.legend()
             plt.grid(True, alpha=0.3)
             
-            # Guardar
-            save_path = f"{self.save_dir}/visualizations/roc_curves.png"
+            save_path = f"{self.save_dir}/visualizations/training_curves_fallback.png"
             plt.savefig(save_path, dpi=300, bbox_inches='tight')
             plt.close()
             
-            print(f"✅ ROC curves guardadas: {save_path}")
-            
-            return roc_auc
-            
-        except Exception as e:
-            print(f"❌ Error crítico en plot_roc_curves: {e}")
-            print("🔧 Creando ROC curve simplificado...")
-            
-            # ✅ FALLBACK: ROC SIMPLIFICADO
-            try:
-                plt.figure(figsize=(8, 6))
-                plt.plot([0, 1], [0, 1], 'k--', lw=2, label='Random Classifier')
-                plt.xlim([0.0, 1.0])
-                plt.ylim([0.0, 1.05])
-                plt.xlabel('False Positive Rate')
-                plt.ylabel('True Positive Rate')
-                plt.title('ROC Curves (Error en datos - Fallback)')
-                plt.legend()
-                plt.grid(True, alpha=0.3)
-                
-                save_path = f"{self.save_dir}/visualizations/roc_curves_fallback.png"
-                plt.savefig(save_path, dpi=300, bbox_inches='tight')
-                plt.close()
-                
-                print(f"✅ ROC fallback guardado: {save_path}")
-                
-            except Exception as e2:
-                print(f"❌ Error en fallback ROC: {e2}")
-            
-            return {}
-
-    def plot_precision_recall_curves(self, y_true, y_probs):
-        """
-        Plot Precision-Recall curves - CORREGIDO para manejar NaN
-        """
-        try:
-            # ✅ VALIDACIÓN Y LIMPIEZA DE DATOS (mismo proceso que ROC)
-            print("🔍 Validando datos para Precision-Recall curves...")
-            
-            # Limpiar NaN
-            nan_mask = np.isnan(y_probs).any(axis=1)
-            if nan_mask.any():
-                print(f"⚠️ Eliminando {nan_mask.sum()} samples con NaN...")
-                y_probs = y_probs[~nan_mask]
-                y_true = y_true[~nan_mask]
-            
-            # Limpiar infinitos
-            inf_mask = np.isinf(y_probs).any(axis=1)
-            if inf_mask.any():
-                print(f"⚠️ Eliminando {inf_mask.sum()} samples con infinitos...")
-                y_probs = y_probs[~inf_mask]
-                y_true = y_true[~inf_mask]
-            
-            # Normalizar probabilidades
-            if y_probs.min() < 0 or y_probs.max() > 1:
-                print(f"⚠️ Normalizando probabilidades...")
-                y_probs = np.exp(y_probs) / np.sum(np.exp(y_probs), axis=1, keepdims=True)
-            
-            if len(y_true) < 10:
-                print(f"❌ Datos insuficientes para PR curves ({len(y_true)} samples)")
-                return
-            
-            # Binarizar labels
-            from sklearn.preprocessing import label_binarize
-            y_true_bin = label_binarize(y_true, classes=range(self.num_classes))
-            if y_true_bin.ndim == 1:
-                y_true_bin = y_true_bin.reshape(-1, 1)
-            
-            # Crear figura
-            plt.figure(figsize=(12, 10))
-            colors = plt.cm.Set3(np.linspace(0, 1, self.num_classes))
-            
-            # PR curve para cada clase
-            pr_auc = {}
-            
-            for i, (color, class_name) in enumerate(zip(colors, self.class_names)):
-                if i >= y_probs.shape[1] or i >= y_true_bin.shape[1]:
-                    continue
-                    
-                class_y_true = y_true_bin[:, i]
-                class_y_probs = y_probs[:, i]
-                
-                # Limpiar NaN específicos
-                class_nan_mask = np.isnan(class_y_probs) | np.isnan(class_y_true)
-                if class_nan_mask.any():
-                    class_y_true = class_y_true[~class_nan_mask]
-                    class_y_probs = class_y_probs[~class_nan_mask]
-                
-                # Verificar variedad de clases
-                if len(np.unique(class_y_true)) < 2:
-                    print(f"⚠️ Clase {class_name}: solo una clase presente, saltando PR")
-                    continue
-                
-                try:
-                    from sklearn.metrics import precision_recall_curve, auc
-                    precision, recall, _ = precision_recall_curve(class_y_true, class_y_probs)
-                    pr_auc[i] = auc(recall, precision)
-                    
-                    plt.plot(recall, precision, color=color, lw=2,
-                            label=f'{class_name} (AUC = {pr_auc[i]:.3f})')
-                            
-                except Exception as e:
-                    print(f"⚠️ Error en PR para clase {class_name}: {e}")
-                    continue
-            
-            # Configuración del plot
-            plt.xlim([0.0, 1.0])
-            plt.ylim([0.0, 1.05])
-            plt.xlabel('Recall', fontsize=12)
-            plt.ylabel('Precision', fontsize=12)
-            plt.title('Precision-Recall Curves', fontsize=14, fontweight='bold')
-            plt.legend(loc="lower left", fontsize=10)
-            plt.grid(True, alpha=0.3)
-            
-            # Guardar
-            save_path = f"{self.save_dir}/visualizations/precision_recall_curves.png"
-            plt.savefig(save_path, dpi=300, bbox_inches='tight')
-            plt.close()
-            
-            print(f"✅ PR curves guardadas: {save_path}")
-            return pr_auc
-            
-        except Exception as e:
-            print(f"❌ Error en Precision-Recall curves: {e}")
-            return {}
-
-    def save_metrics_json(self, metrics_dict, filename="detailed_metrics.json"):
-        """
-        Guardar métricas en JSON
-        """
-        # Agregar timestamp
-        metrics_dict['timestamp'] = datetime.now().isoformat()
-        metrics_dict['num_classes'] = self.num_classes
-        metrics_dict['class_names'] = self.class_names
-        
-        save_path = f"{self.save_dir}/metrics/{filename}"
-        with open(save_path, 'w') as f:
-            json.dump(metrics_dict, f, indent=4)
-        
-        print(f"✅ Métricas guardadas: {save_path}")
-    
-    def generate_classification_report(self, y_true, y_pred, save_name="classification_report.txt"):
-        """
-        Generar reporte detallado de clasificación
-        """
-        if torch.is_tensor(y_true):
-            y_true = y_true.cpu().numpy()
-        if torch.is_tensor(y_pred):
-            y_pred = y_pred.cpu().numpy()
-        
-        report = classification_report(
-            y_true, y_pred, 
-            target_names=self.class_names,
-            digits=4
-        )
-        
-        save_path = f"{self.save_dir}/metrics/{save_name}"
-        with open(save_path, 'w') as f:
-            f.write("CIFFNET CLASSIFICATION REPORT\n")
-            f.write("=" * 50 + "\n\n")
-            f.write(report)
-            f.write(f"\n\nGenerated: {datetime.now().isoformat()}\n")
-        
-        print(f"✅ Classification report guardado: {save_path}")
-        return report
-
-    def plot_training_curves(self, history):
-        """
-        Plot training curves - MÉTODO FALTANTE AGREGADO
-        """
-        try:
-            print("📊 Generando curvas de entrenamiento...")
-            
-            if not history or len(history) == 0:
-                print("⚠️ No hay historia de entrenamiento disponible")
-                return
-            
-            # Verificar qué métricas están disponibles
-            available_metrics = list(history.keys())
-            print(f"📋 Métricas disponibles: {available_metrics}")
-            
-            # Crear subplots
-            fig, axes = plt.subplots(2, 2, figsize=(15, 12))
-            fig.suptitle('Training History', fontsize=16, fontweight='bold')
-            
-            # 1. Loss curves
-            if 'train_loss' in history and 'val_loss' in history:
-                axes[0, 0].plot(history['train_loss'], label='Training Loss', color='blue')
-                axes[0, 0].plot(history['val_loss'], label='Validation Loss', color='red')
-                axes[0, 0].set_title('Loss Curves')
-                axes[0, 0].set_xlabel('Epoch')
-                axes[0, 0].set_ylabel('Loss')
-                axes[0, 0].legend()
-                axes[0, 0].grid(True, alpha=0.3)
-            else:
-                axes[0, 0].text(0.5, 0.5, 'Loss data not available', 
-                              ha='center', va='center', transform=axes[0, 0].transAxes)
-            
-            # 2. Accuracy curves
-            if 'train_acc' in history and 'val_acc' in history:
-                axes[0, 1].plot(history['train_acc'], label='Training Accuracy', color='blue')
-                axes[0, 1].plot(history['val_acc'], label='Validation Accuracy', color='red')
-                axes[0, 1].set_title('Accuracy Curves')
-                axes[0, 1].set_xlabel('Epoch')
-                axes[0, 1].set_ylabel('Accuracy')
-                axes[0, 1].legend()
-                axes[0, 1].grid(True, alpha=0.3)
-            else:
-                axes[0, 1].text(0.5, 0.5, 'Accuracy data not available', 
-                              ha='center', va='center', transform=axes[0, 1].transAxes)
-            
-            # 3. F1-Score curves
-            if 'train_f1' in history and 'val_f1' in history:
-                axes[1, 0].plot(history['train_f1'], label='Training F1', color='blue')
-                axes[1, 0].plot(history['val_f1'], label='Validation F1', color='red')
-                axes[1, 0].set_title('F1-Score Curves')
-                axes[1, 0].set_xlabel('Epoch')
-                axes[1, 0].set_ylabel('F1-Score')
-                axes[1, 0].legend()
-                axes[1, 0].grid(True, alpha=0.3)
-            else:
-                axes[1, 0].text(0.5, 0.5, 'F1 data not available', 
-                              ha='center', va='center', transform=axes[1, 0].transAxes)
-            
-            # 4. Learning Rate (si está disponible)
-            if 'learning_rate' in history:
-                axes[1, 1].plot(history['learning_rate'], label='Learning Rate', color='green')
-                axes[1, 1].set_title('Learning Rate Schedule')
-                axes[1, 1].set_xlabel('Epoch')
-                axes[1, 1].set_ylabel('Learning Rate')
-                axes[1, 1].legend()
-                axes[1, 1].grid(True, alpha=0.3)
-                axes[1, 1].set_yscale('log')
-            else:
-                # Mostrar mejor métrica disponible
-                best_metric_key = None
-                for key in ['val_acc', 'val_f1', 'train_acc', 'train_f1']:
-                    if key in history:
-                        best_metric_key = key
-                        break
-                
-                if best_metric_key:
-                    axes[1, 1].plot(history[best_metric_key], label=best_metric_key, color='purple')
-                    axes[1, 1].set_title(f'Best Available Metric: {best_metric_key}')
-                    axes[1, 1].set_xlabel('Epoch')
-                    axes[1, 1].set_ylabel(best_metric_key)
-                    axes[1, 1].legend()
-                    axes[1, 1].grid(True, alpha=0.3)
-                else:
-                    axes[1, 1].text(0.5, 0.5, 'No additional metrics available', 
-                                  ha='center', va='center', transform=axes[1, 1].transAxes)
-            
-            # Ajustar layout
-            plt.tight_layout()
-            
-            # Guardar
-            save_path = f"{self.save_dir}/visualizations/training_curves.png"
-            plt.savefig(save_path, dpi=300, bbox_inches='tight')
-            plt.close()
-            
-            print(f"✅ Training curves guardadas: {save_path}")
-            
-        except Exception as e:
-            print(f"❌ Error en plot_training_curves: {e}")
-            
-            # Fallback: plot simple
-            try:
-                plt.figure(figsize=(10, 6))
-                
-                # Plot cualquier métrica disponible
-                if history and len(history) > 0:
-                    for key, values in history.items():
-                        if isinstance(values, list) and len(values) > 0:
-                            plt.plot(values, label=key)
-                    
-                    plt.title('Training History (Fallback)')
-                    plt.xlabel('Epoch')
-                    plt.ylabel('Metric Value')
-                    plt.legend()
-                    plt.grid(True, alpha=0.3)
-                    
-                    save_path = f"{self.save_dir}/visualizations/training_curves_fallback.png"
-                    plt.savefig(save_path, dpi=300, bbox_inches='tight')
-                    plt.close()
-                    
-                    print(f"✅ Training curves fallback guardado: {save_path}")
-                else:
-                    print("❌ No hay datos de historia para plotear")
-                    
-            except Exception as e2:
-                print(f"❌ Error en fallback training curves: {e2}")
+            print(f"✅ Training curves fallback guardado: {save_path}")
+        except Exception as e2:
+            print(f"❌ Error en fallback training curves: {e2}")
 
 def plot_training_history(self, history):
     """
     Alias para compatibilidad - redirige a plot_training_curves
     """
     return self.plot_training_curves(history)
-
-def create_all_visualizations(metrics_calculator, y_true, y_pred, y_probs, 
-                            cliff_scores=None, confidences=None, history=None):
-    """
-    Función helper para crear todas las visualizaciones
-    """
-    print("🎨 Generando todas las visualizaciones...")
-    
-    # Confusion Matrix
-    metrics_calculator.plot_confusion_matrix(y_true, y_pred, normalize=True)
-    metrics_calculator.plot_confusion_matrix(y_true, y_pred, normalize=False, save_name="confusion_matrix_counts")
-    
-    # ROC Curves
-    if y_probs is not None:
-        metrics_calculator.plot_roc_curves(y_true, y_probs)
-        metrics_calculator.plot_precision_recall_curves(y_true, y_probs)
-    
-    # Training curves
-    if history is not None:
-        metrics_calculator.plot_training_curves(history)
-    
-    print("✅ Todas las visualizaciones generadas")
-
-if __name__ == "__main__":
-    # Test básico
-    print("🧪 Testing CiffNet Metrics")
-    
-    # Datos de prueba
-    np.random.seed(42)
-    n_samples = 1000
-    n_classes = 7
-    
-    y_true = np.random.randint(0, n_classes, n_samples)
-    y_pred = np.random.randint(0, n_classes, n_samples)
-    y_probs = np.random.rand(n_samples, n_classes)
-    y_probs = y_probs / y_probs.sum(axis=1, keepdims=True)  # Normalize
-    
-    # Crear metrics calculator
-    metrics_calc = CiffNetMetrics(num_classes=n_classes)
-    
-    # Compute metrics
-    basic_metrics = metrics_calc.compute_basic_metrics(y_true, y_pred, y_probs)
-    print("✅ Basic metrics computed")
-    
-    # Generate visualizations
-    create_all_visualizations(metrics_calc, y_true, y_pred, y_probs)
-    
-    # Save metrics
-    metrics_calc.save_metrics_json(basic_metrics)
-    metrics_calc.generate_classification_report(y_true, y_pred)
-    
-    print("🎯 CiffNet Metrics test completado")
