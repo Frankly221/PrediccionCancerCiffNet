@@ -586,6 +586,137 @@ class CiffNetMetrics:
         
         print(f"✅ Classification report guardado: {save_path}")
         return report
+    def plot_training_curves(self, history):  # ← CORREGIR INDENTACIÓN AQUÍ
+        """
+        Plot training curves - MÉTODO FALTANTE AGREGADO
+        """
+        try:
+            print("📊 Generando curvas de entrenamiento...")
+            
+            if not history or len(history) == 0:
+                print("⚠️ No hay historia de entrenamiento disponible")
+                return
+            
+            # Verificar qué métricas están disponibles
+            available_metrics = list(history.keys())
+            print(f"📋 Métricas disponibles: {available_metrics}")
+            
+            # Crear subplots
+            fig, axes = plt.subplots(2, 2, figsize=(15, 12))
+            fig.suptitle('Training History', fontsize=16, fontweight='bold')
+            
+            # 1. Loss curves
+            if 'train_loss' in history and 'val_loss' in history:
+                axes[0, 0].plot(history['train_loss'], label='Training Loss', color='blue')
+                axes[0, 0].plot(history['val_loss'], label='Validation Loss', color='red')
+                axes[0, 0].set_title('Loss Curves')
+                axes[0, 0].set_xlabel('Epoch')
+                axes[0, 0].set_ylabel('Loss')
+                axes[0, 0].legend()
+                axes[0, 0].grid(True, alpha=0.3)
+            else:
+                axes[0, 0].text(0.5, 0.5, 'Loss data not available', 
+                              ha='center', va='center', transform=axes[0, 0].transAxes)
+            
+            # 2. Accuracy curves
+            if 'train_acc' in history and 'val_acc' in history:
+                axes[0, 1].plot(history['train_acc'], label='Training Accuracy', color='blue')
+                axes[0, 1].plot(history['val_acc'], label='Validation Accuracy', color='red')
+                axes[0, 1].set_title('Accuracy Curves')
+                axes[0, 1].set_xlabel('Epoch')
+                axes[0, 1].set_ylabel('Accuracy')
+                axes[0, 1].legend()
+                axes[0, 1].grid(True, alpha=0.3)
+            else:
+                axes[0, 1].text(0.5, 0.5, 'Accuracy data not available', 
+                              ha='center', va='center', transform=axes[0, 1].transAxes)
+            
+            # 3. F1-Score curves
+            if 'train_f1' in history and 'val_f1' in history:
+                axes[1, 0].plot(history['train_f1'], label='Training F1', color='blue')
+                axes[1, 0].plot(history['val_f1'], label='Validation F1', color='red')
+                axes[1, 0].set_title('F1-Score Curves')
+                axes[1, 0].set_xlabel('Epoch')
+                axes[1, 0].set_ylabel('F1-Score')
+                axes[1, 0].legend()
+                axes[1, 0].grid(True, alpha=0.3)
+            else:
+                axes[1, 0].text(0.5, 0.5, 'F1 data not available', 
+                              ha='center', va='center', transform=axes[1, 0].transAxes)
+            
+            # 4. Learning Rate (si está disponible)
+            if 'learning_rate' in history:
+                axes[1, 1].plot(history['learning_rate'], label='Learning Rate', color='green')
+                axes[1, 1].set_title('Learning Rate Schedule')
+                axes[1, 1].set_xlabel('Epoch')
+                axes[1, 1].set_ylabel('Learning Rate')
+                axes[1, 1].legend()
+                axes[1, 1].grid(True, alpha=0.3)
+                axes[1, 1].set_yscale('log')
+            else:
+                # Mostrar mejor métrica disponible
+                best_metric_key = None
+                for key in ['val_acc', 'val_f1', 'train_acc', 'train_f1']:
+                    if key in history:
+                        best_metric_key = key
+                        break
+                
+                if best_metric_key:
+                    axes[1, 1].plot(history[best_metric_key], label=best_metric_key, color='purple')
+                    axes[1, 1].set_title(f'Best Available Metric: {best_metric_key}')
+                    axes[1, 1].set_xlabel('Epoch')
+                    axes[1, 1].set_ylabel(best_metric_key)
+                    axes[1, 1].legend()
+                    axes[1, 1].grid(True, alpha=0.3)
+                else:
+                    axes[1, 1].text(0.5, 0.5, 'No additional metrics available', 
+                                  ha='center', va='center', transform=axes[1, 1].transAxes)
+            
+            # Ajustar layout
+            plt.tight_layout()
+            
+            # Guardar
+            save_path = f"{self.save_dir}/visualizations/training_curves.png"
+            plt.savefig(save_path, dpi=300, bbox_inches='tight')
+            plt.close()
+            
+            print(f"✅ Training curves guardadas: {save_path}")
+            
+        except Exception as e:
+            print(f"❌ Error en plot_training_curves: {e}")
+            
+            # Fallback: plot simple
+            try:
+                plt.figure(figsize=(10, 6))
+                
+                # Plot cualquier métrica disponible
+                if history and len(history) > 0:
+                    for key, values in history.items():
+                        if isinstance(values, list) and len(values) > 0:
+                            plt.plot(values, label=key)
+                    
+                    plt.title('Training History (Fallback)')
+                    plt.xlabel('Epoch')
+                    plt.ylabel('Metric Value')
+                    plt.legend()
+                    plt.grid(True, alpha=0.3)
+                    
+                    save_path = f"{self.save_dir}/visualizations/training_curves_fallback.png"
+                    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+                    plt.close()
+                    
+                    print(f"✅ Training curves fallback guardado: {save_path}")
+                else:
+                    print("❌ No hay datos de historia para plotear")
+                    
+            except Exception as e2:
+                print(f"❌ Error en fallback training curves: {e2}")
+
+    def plot_training_history(self, history):  # ← TAMBIÉN CORREGIR INDENTACIÓN
+        """
+        Alias para compatibilidad - redirige a plot_training_curves
+        """
+        return self.plot_training_curves(history)
 
 def create_all_visualizations(metrics_calculator, y_true, y_pred, y_probs, 
                             cliff_scores=None, confidences=None, history=None):
