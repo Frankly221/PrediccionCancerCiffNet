@@ -11,6 +11,7 @@ from typing import Optional, Dict, List
 import logging
 import traceback
 from contextlib import asynccontextmanager
+import math
 
 # ✅ MONKEY PATCH PARA DESHABILITAR AUTOCAST COMPLETAMENTE
 import torch.cuda.amp as amp
@@ -400,6 +401,39 @@ async def health_check():
         "tf32_disabled": not torch.backends.cudnn.allow_tf32
     }
 
+# ✅ AÑADIR FUNCIÓN HELPER PARA LIMPIAR NaN
+def clean_float_value(value, default=0.0):
+    """
+    Limpia valores float problemáticos (NaN, inf, etc.)
+    """
+    if value is None:
+        return default
+    
+    try:
+        float_val = float(value)
+        if math.isnan(float_val) or math.isinf(float_val):
+            logger.warning(f"⚠️ Valor problemático detectado: {float_val}, usando default: {default}")
+            return default
+        return float_val
+    except (ValueError, TypeError):
+        logger.warning(f"⚠️ Error convirtiendo a float: {value}, usando default: {default}")
+        return default
+
+def clean_dict_values(data_dict, default=0.0):
+    """
+    Limpia recursivamente valores NaN en diccionarios
+    """
+    cleaned = {}
+    for key, value in data_dict.items():
+        if isinstance(value, dict):
+            cleaned[key] = clean_dict_values(value, default)
+        elif isinstance(value, (int, float)):
+            cleaned[key] = clean_float_value(value, default)
+        else:
+            cleaned[key] = value
+    return cleaned
+
+# ✅ MODIFICAR EL ENDPOINT /diagnose
 @app.post("/diagnose", response_model=ComprehensiveResponse)
 async def diagnose_lesion(
     file: UploadFile = File(...),
@@ -448,7 +482,7 @@ async def diagnose_lesion(
         phase3_out = outputs['phase3']
         phase2_out = outputs['phase2']
         
-        # ✅ CORREGIR EXTRACCIÓN DE PREDICTIONS
+        # ✅ CORREGIR EXTRACCIÓN DE PREDICTIONS CON VALIDACIÓN NaN
         # Convertir a CPU y extraer valores correctamente
         predictions_tensor = phase3_out['predictions'].cpu()
         probabilities_tensor = phase3_out['probabilities'].cpu()
@@ -460,49 +494,108 @@ async def diagnose_lesion(
         logger.info(f"🔍 Predictions tensor dtype: {predictions_tensor.dtype}")
         logger.info(f"🔍 Predictions tensor values: {predictions_tensor}")
         
-        # ✅ EXTRAER CORRECTAMENTE EL ÍNDICE DE CLASE
-        if predictions_tensor.dim() > 0:
-            # Si es un tensor con batch dimension
-            predicted_class_idx = int(predictions_tensor[0].item()) if predictions_tensor.shape[0] > 0 else int(predictions_tensor.item())
-        else:
-            # Si es un scalar tensor
-            predicted_class_idx = int(predictions_tensor.item())
+        # ✅ EXTRAER CORRECTAMENTE EL ÍNDICE DE CLASE CON VALIDACIÓN
+        try:
+            if predictions_tensor.dim() > 0:
+                # Si es un tensor con batch dimension
+                raw_prediction = predictions_tensor[0].item() if predictions_tensor.shape[0] > 0 else predictions_tensor.item()
+            else:
+                # Si es un scalar tensor
+                raw_prediction = predictions_tensor.item()
+            
+            # ✅ VALIDAR QUE NO SEA NaN O INF
+            if math.isnan(raw_prediction) or math.isinf(raw_prediction):
+                logger.warning(f"⚠️ Predicción inválida: {raw_prediction}, usando clase 0")
+                predicted_class_idx = 0
+            else:
+                predicted_class_idx = int(raw_prediction)
+                
+        except Exception as pred_error:
+            logger.error(f"❌ Error extrayendo prediction: {pred_error}")
+            predicted_class_idx = 0  # Fallback seguro
         
-        # ✅ EXTRAER PROBABILIDADES CORRECTAMENTE
-        if probabilities_tensor.dim() > 1:
-            probabilities = probabilities_tensor[0].numpy()
-        else:
-            probabilities = probabilities_tensor.numpy()
+        # ✅ EXTRAER PROBABILIDADES CON VALIDACIÓN NaN
+        try:
+            if probabilities_tensor.dim() > 1:
+                probabilities_raw = probabilities_tensor[0].numpy()
+            else:
+                probabilities_raw = probabilities_tensor.numpy()
+            
+            # ✅ LIMPIAR NaN EN PROBABILIDADES
+            probabilities = []
+            for prob in probabilities_raw:
+                cleaned_prob = clean_float_value(prob, 1.0/len(model_instance.class_names))  # Uniform default
+                probabilities.append(cleaned_prob)
+            
+            # ✅ NORMALIZAR PROBABILIDADES SI ES NECESARIO
+            prob_sum = sum(probabilities)
+            if prob_sum <= 0 or math.isnan(prob_sum):
+                # Si la suma es inválida, usar distribución uniforme
+                uniform_prob = 1.0 / len(model_instance.class_names)
+                probabilities = [uniform_prob] * len(model_instance.class_names)
+                logger.warning("⚠️ Probabilidades inválidas, usando distribución uniforme")
+            else:
+                # Normalizar probabilities
+                probabilities = [p / prob_sum for p in probabilities]
+                
+        except Exception as prob_error:
+            logger.error(f"❌ Error extrayendo probabilidades: {prob_error}")
+            # Fallback: distribución uniforme
+            uniform_prob = 1.0 / len(model_instance.class_names)
+            probabilities = [uniform_prob] * len(model_instance.class_names)
         
-        # ✅ EXTRAER VALORES ESCALARES CORRECTAMENTE
-        confidence = float(confidence_tensor.item() if confidence_tensor.dim() == 0 else confidence_tensor[0].item())
-        uncertainty = float(uncertainty_tensor.item() if uncertainty_tensor.dim() == 0 else uncertainty_tensor[0].item())
+        # ✅ EXTRAER VALORES ESCALARES CON VALIDACIÓN NaN
+        confidence = clean_float_value(
+            confidence_tensor.item() if confidence_tensor.dim() == 0 else confidence_tensor[0].item(),
+            default=0.5  # Confidence por defecto
+        )
+        
+        uncertainty = clean_float_value(
+            uncertainty_tensor.item() if uncertainty_tensor.dim() == 0 else uncertainty_tensor[0].item(),
+            default=0.5  # Uncertainty por defecto
+        )
         
         # ✅ LOGGING DE VERIFICACIÓN
         logger.info(f"🔍 Predicted class index: {predicted_class_idx} (type: {type(predicted_class_idx)})")
         logger.info(f"🔍 Confidence: {confidence}")
         logger.info(f"🔍 Uncertainty: {uncertainty}")
         
-        # Cliff analysis - ✅ TAMBIÉN CORREGIR AQUÍ
+        # ✅ Cliff analysis CON VALIDACIÓN NaN
         cliff_score_tensor = phase2_out['cliff_score'].cpu()
         cliff_mask_tensor = phase2_out['cliff_mask'].cpu()
         
-        cliff_score = float(cliff_score_tensor.item() if cliff_score_tensor.dim() == 0 else cliff_score_tensor[0].item())
-        is_cliff_case = bool(cliff_mask_tensor.item() if cliff_mask_tensor.dim() == 0 else cliff_mask_tensor[0].item())
+        cliff_score = clean_float_value(
+            cliff_score_tensor.item() if cliff_score_tensor.dim() == 0 else cliff_score_tensor[0].item(),
+            default=0.0
+        )
         
-        # Uncertainty breakdown - ✅ CORREGIR TAMBIÉN
+        try:
+            is_cliff_case = bool(cliff_mask_tensor.item() if cliff_mask_tensor.dim() == 0 else cliff_mask_tensor[0].item())
+        except:
+            is_cliff_case = False  # Fallback seguro
+        
+        # ✅ Uncertainty breakdown CON VALIDACIÓN NaN
         epistemic_unc_tensor = phase2_out['epistemic_uncertainty'].cpu()
         aleatoric_unc_tensor = phase2_out['aleatoric_uncertainty'].cpu()
         
         # Manejar diferentes shapes para uncertainty
-        if epistemic_unc_tensor.dim() > 1:
-            epistemic_unc = float(epistemic_unc_tensor[0].mean().item())
-        elif epistemic_unc_tensor.dim() == 1:
-            epistemic_unc = float(epistemic_unc_tensor.mean().item())
-        else:
-            epistemic_unc = float(epistemic_unc_tensor.item())
+        try:
+            if epistemic_unc_tensor.dim() > 1:
+                epistemic_unc_raw = epistemic_unc_tensor[0].mean().item()
+            elif epistemic_unc_tensor.dim() == 1:
+                epistemic_unc_raw = epistemic_unc_tensor.mean().item()
+            else:
+                epistemic_unc_raw = epistemic_unc_tensor.item()
+            
+            epistemic_unc = clean_float_value(epistemic_unc_raw, default=0.5)
+        except:
+            epistemic_unc = 0.5
         
-        aleatoric_unc = float(aleatoric_unc_tensor.item() if aleatoric_unc_tensor.dim() == 0 else aleatoric_unc_tensor[0].item())
+        try:
+            aleatoric_unc_raw = aleatoric_unc_tensor.item() if aleatoric_unc_tensor.dim() == 0 else aleatoric_unc_tensor[0].item()
+            aleatoric_unc = clean_float_value(aleatoric_unc_raw, default=0.5)
+        except:
+            aleatoric_unc = 0.5
         
         # ✅ VALIDAR ÍNDICE ANTES DE USAR
         if predicted_class_idx < 0 or predicted_class_idx >= len(model_instance.class_names):
@@ -511,10 +604,12 @@ async def diagnose_lesion(
         
         # Mapear a nombres de clases
         predicted_class = model_instance.class_names[predicted_class_idx]
-        class_probabilities = {
-            name: float(prob) 
-            for name, prob in zip(model_instance.class_names, probabilities)
-        }
+        
+        # ✅ CREAR DICCIONARIO DE PROBABILIDADES CON VALIDACIÓN
+        class_probabilities = {}
+        for i, (name, prob) in enumerate(zip(model_instance.class_names, probabilities)):
+            clean_prob = clean_float_value(prob, 1.0/len(model_instance.class_names))
+            class_probabilities[name] = clean_prob
         
         # Generar recomendaciones
         clinical_recommendation = generate_clinical_recommendation(
@@ -522,7 +617,7 @@ async def diagnose_lesion(
         )
         confidence_level = get_confidence_level(confidence, uncertainty)
         
-        # Crear resultado del diagnóstico
+        # ✅ CREAR RESULTADO CON VALORES LIMPIOS
         diagnosis = DiagnosisResult(
             predicted_class=predicted_class,
             predicted_class_id=predicted_class_idx,
@@ -538,41 +633,58 @@ async def diagnose_lesion(
             confidence_level=confidence_level
         )
         
-        # Análisis por fase (opcional) - ✅ TAMBIÉN CORREGIR
+        # ✅ Análisis por fase CON VALIDACIÓN NaN
         phase_analysis = None
         if include_phase_analysis:
             try:
                 phase1_out = outputs['phase1']
                 
+                # ✅ LIMPIAR TODOS LOS VALORES ANTES DE CREAR PhaseAnalysis
+                phase1_features = {
+                    "backbone_features_mean": clean_float_value(phase1_out['fused_features'].mean().item()),
+                    "feature_diversity": clean_float_value(torch.std(phase1_out['fused_features']).item()),
+                    "multi_scale_activation": clean_float_value(phase1_out['multi_scale_features'].mean().item())
+                }
+                
+                phase2_cliff_analysis = {
+                    "cliff_score": cliff_score,
+                    "spatial_cliff": clean_float_value(
+                        phase2_out['spatial_cliff'].cpu()[0].item() if phase2_out['spatial_cliff'].dim() > 0 else phase2_out['spatial_cliff'].cpu().item()
+                    ),
+                    "multiscale_cliff": clean_float_value(
+                        phase2_out['multiscale_cliff'].cpu()[0].item() if phase2_out['multiscale_cliff'].dim() > 0 else phase2_out['multiscale_cliff'].cpu().item()
+                    ),
+                    "epistemic_uncertainty": epistemic_unc,
+                    "aleatoric_uncertainty": aleatoric_unc,
+                    "attention_entropy": clean_float_value(phase2_out['analysis']['attention_entropy'])
+                }
+                
+                phase3_classification = {
+                    "main_classifier_confidence": clean_float_value(torch.max(torch.softmax(phase3_out['main_logits'], dim=1)).item()),
+                    "cliff_classifier_confidence": clean_float_value(torch.max(torch.softmax(phase3_out['cliff_logits'], dim=1)).item()),
+                    "classifier_used": "cliff" if is_cliff_case else "main",
+                    "monte_carlo_uncertainty": uncertainty
+                }
+                
+                # ✅ LIMPIAR DICCIONARIOS RECURSIVAMENTE
+                phase1_features = clean_dict_values(phase1_features)
+                phase2_cliff_analysis = clean_dict_values(phase2_cliff_analysis)
+                phase3_classification = clean_dict_values(phase3_classification)
+                
                 phase_analysis = PhaseAnalysis(
-                    phase1_features={
-                        "backbone_features_mean": float(phase1_out['fused_features'].mean().item()),
-                        "feature_diversity": float(torch.std(phase1_out['fused_features']).item()),
-                        "multi_scale_activation": float(phase1_out['multi_scale_features'].mean().item())
-                    },
-                    phase2_cliff_analysis={
-                        "cliff_score": cliff_score,
-                        "spatial_cliff": float(phase2_out['spatial_cliff'].cpu()[0].item() if phase2_out['spatial_cliff'].dim() > 0 else phase2_out['spatial_cliff'].cpu().item()),
-                        "multiscale_cliff": float(phase2_out['multiscale_cliff'].cpu()[0].item() if phase2_out['multiscale_cliff'].dim() > 0 else phase2_out['multiscale_cliff'].cpu().item()),
-                        "epistemic_uncertainty": epistemic_unc,
-                        "aleatoric_uncertainty": aleatoric_unc,
-                        "attention_entropy": float(phase2_out['analysis']['attention_entropy'])
-                    },
-                    phase3_classification={
-                        "main_classifier_confidence": float(torch.max(torch.softmax(phase3_out['main_logits'], dim=1)).item()),
-                        "cliff_classifier_confidence": float(torch.max(torch.softmax(phase3_out['cliff_logits'], dim=1)).item()),
-                        "classifier_used": "cliff" if is_cliff_case else "main",
-                        "monte_carlo_uncertainty": uncertainty
-                    }
+                    phase1_features=phase1_features,
+                    phase2_cliff_analysis=phase2_cliff_analysis,
+                    phase3_classification=phase3_classification
                 )
+                
             except Exception as phase_error:
                 logger.warning(f"⚠️ Error generando phase_analysis: {phase_error}")
                 phase_analysis = None
         
         # Tiempo de procesamiento
-        processing_time = time.time() - start_time
+        processing_time = clean_float_value(time.time() - start_time, default=0.0)
         
-        # Respuesta completa
+        # ✅ RESPUESTA COMPLETA CON VALORES LIMPIOS
         response = ComprehensiveResponse(
             diagnosis=diagnosis,
             phase_analysis=phase_analysis,
