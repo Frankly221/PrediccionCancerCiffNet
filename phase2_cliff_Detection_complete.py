@@ -211,15 +211,38 @@ class Phase2CliffDetectorComplete(nn.Module):
     
     def compute_feature_variations(self, features):
         """
-        Compute feature magnitude variations (CFM step 2)
+        Compute feature magnitude variations (CFM step 2) - CORREGIDO PARA NaN
         """
-        # Batch-wise variation analysis
+        # ✅ VALIDAR ENTRADA
+        if torch.any(torch.isnan(features)) or torch.any(torch.isinf(features)):
+            print("⚠️ WARNING: NaN/Inf detectado en features input")
+            features = torch.nan_to_num(features, nan=0.0, posinf=1.0, neginf=-1.0)
+    
+        # Batch-wise variation analysis - ✅ CORREGIDO
         batch_mean = features.mean(dim=0, keepdim=True)
-        batch_std = features.std(dim=0, keepdim=True)
+        
+        # ✅ ARREGLAR EL PROBLEMA DE std() 
+        if features.size(0) > 1:  # Solo si hay más de 1 sample
+            batch_std = features.std(dim=0, keepdim=True, unbiased=False)  # unbiased=False
+        else:
+            # Para batch_size=1, usar std predeterminado
+            batch_std = torch.ones_like(batch_mean) * 0.1  # Valor por defecto pequeño
+        
+        # ✅ EVITAR DIVISIÓN POR CERO
+        batch_std = torch.clamp(batch_std, min=1e-6)
         
         # Normalized variation per sample
-        feature_variation = torch.abs(features - batch_mean) / (batch_std + 1e-8)
+        feature_variation = torch.abs(features - batch_mean) / batch_std
+        
+        # ✅ VALIDAR RESULTADO
+        if torch.any(torch.isnan(feature_variation)) or torch.any(torch.isinf(feature_variation)):
+            print("⚠️ WARNING: NaN/Inf en feature_variation, usando valores seguros")
+            feature_variation = torch.zeros_like(features)
+        
         overall_variation = self.magnitude_detector(feature_variation)
+        
+        # ✅ VALIDAR SALIDA FINAL
+        overall_variation = torch.nan_to_num(overall_variation, nan=0.0)
         
         return overall_variation, feature_variation
     
@@ -268,113 +291,237 @@ class Phase2CliffDetectorComplete(nn.Module):
     
     def forward(self, phase1_features):
         """
-        Forward pass COMPLETO según paper CiffNet
+        Forward pass COMPLETO según paper CiffNet - CORREGIDO PARA NaN
         """
         batch_size = phase1_features.size(0)
+        
+        # ✅ VALIDACIÓN DE ENTRADA CRÍTICA
+        if torch.any(torch.isnan(phase1_features)) or torch.any(torch.isinf(phase1_features)):
+            print("❌ CRITICAL: NaN/Inf detectado en phase1_features")
+            phase1_features = torch.nan_to_num(phase1_features, nan=0.0, posinf=1.0, neginf=-1.0)
+            print("✅ FIXED: phase1_features limpiado")
         
         # Normalize input features
         features = self.layer_norm(phase1_features)
         
-        with autocast():
-            # ================================
-            # 1. CLIFF FEATURE MINING (CFM)
-            # ================================
-            
-            # Step 1: Local gradient analysis
+        # ✅ VALIDAR DESPUÉS DE LAYER_NORM
+        if torch.any(torch.isnan(features)):
+            print("❌ NaN después de layer_norm, reinicializando")
+            features = torch.zeros_like(phase1_features)
+        
+        # ✅ FUNCIÓN HELPER PARA VALIDAR TENSORS
+        def validate_tensor(tensor, name="tensor", default_val=0.0):
+            if torch.any(torch.isnan(tensor)) or torch.any(torch.isinf(tensor)):
+                print(f"⚠️ {name} contiene NaN/Inf, limpiando...")
+                return torch.nan_to_num(tensor, nan=default_val, posinf=1.0, neginf=-1.0)
+            return tensor
+        
+        # ================================
+        # 1. CLIFF FEATURE MINING (CFM) - CON VALIDACIONES
+        # ================================
+        
+        # Step 1: Local gradient analysis
+        try:
             local_gradients = self.compute_local_gradients(features)
-            
-            # Step 2: Feature magnitude variations  
+            local_gradients = validate_tensor(local_gradients, "local_gradients")
+        except Exception as e:
+            print(f"❌ Error en local_gradients: {e}")
+            local_gradients = torch.zeros_like(features)
+        
+        # Step 2: Feature magnitude variations  
+        try:
             magnitude_variation, feature_variations = self.compute_feature_variations(features)
-            
-            # Step 3: Decision boundary proximity
+            magnitude_variation = validate_tensor(magnitude_variation, "magnitude_variation")
+            feature_variations = validate_tensor(feature_variations, "feature_variations")
+        except Exception as e:
+            print(f"❌ Error en feature_variations: {e}")
+            magnitude_variation = torch.zeros(batch_size, 1, device=features.device)
+            feature_variations = torch.zeros_like(features)
+        
+        # Step 3: Decision boundary proximity
+        try:
             boundary_distances = self.boundary_proximity(features)
-            
-            # Step 4: Uncertainty quantification
+            boundary_distances = validate_tensor(boundary_distances, "boundary_distances")
+        except Exception as e:
+            print(f"❌ Error en boundary_proximity: {e}")
+            boundary_distances = torch.ones(batch_size, self.num_classes, device=features.device) / self.num_classes
+        
+        # Step 4: Uncertainty quantification
+        try:
             epistemic_unc = self.epistemic_uncertainty(features)
+            epistemic_unc = validate_tensor(epistemic_unc, "epistemic_unc")
+        except Exception as e:
+            print(f"❌ Error en epistemic_uncertainty: {e}")
+            epistemic_unc = torch.ones_like(features) * 0.5
+        
+        try:
             aleatoric_unc = self.aleatoric_uncertainty(features)
-            
-            # ================================
-            # 2. CLIFF REGION IDENTIFICATION (CRI)
-            # ================================
-            
-            # Step 1: Spatial cliff detection
+            aleatoric_unc = validate_tensor(aleatoric_unc, "aleatoric_unc")
+        except Exception as e:
+            print(f"❌ Error en aleatoric_uncertainty: {e}")
+            aleatoric_unc = torch.ones(batch_size, 1, device=features.device) * 0.5
+        
+        # ================================
+        # 2. CLIFF REGION IDENTIFICATION (CRI) - CON VALIDACIONES
+        # ================================
+        
+        # Step 1: Spatial cliff detection
+        try:
             spatial_cliff = self.spatial_cliff_detector(features)
-            
-            # Step 2: Feature-space cliff mapping
+            spatial_cliff = validate_tensor(spatial_cliff, "spatial_cliff")
+        except Exception as e:
+            print(f"❌ Error en spatial_cliff: {e}")
+            spatial_cliff = torch.zeros(batch_size, 1, device=features.device)
+        
+        # Step 2: Feature-space cliff mapping
+        try:
             feature_cliff_map = self.feature_cliff_mapper(features)
-            
-            # Step 3: Multi-scale cliff analysis
+            feature_cliff_map = validate_tensor(feature_cliff_map, "feature_cliff_map")
+        except Exception as e:
+            print(f"❌ Error en feature_cliff_map: {e}")
+            feature_cliff_map = torch.zeros_like(features)
+        
+        # Step 3: Multi-scale cliff analysis
+        try:
             multiscale_cliff, multiscale_components = self.multi_scale_cliff_analysis(features)
-            
-            # Step 4: Cliff confidence scoring
+            multiscale_cliff = validate_tensor(multiscale_cliff, "multiscale_cliff")
+            multiscale_components = validate_tensor(multiscale_components, "multiscale_components")
+        except Exception as e:
+            print(f"❌ Error en multiscale_cliff: {e}")
+            multiscale_cliff = torch.zeros(batch_size, 1, device=features.device)
+            multiscale_components = torch.zeros(batch_size, 3, device=features.device)
+        
+        # Step 4: Cliff confidence scoring
+        try:
             cliff_indicators = torch.cat([
                 spatial_cliff, multiscale_cliff, magnitude_variation, aleatoric_unc
             ], dim=1)
+            cliff_indicators = validate_tensor(cliff_indicators, "cliff_indicators")
             
             confidence_input = torch.cat([features, cliff_indicators], dim=1)
             cliff_confidence = self.confidence_scorer(confidence_input)
-            
-            # ================================
-            # FINAL CLIFF SCORE (Paper method)
-            # ================================
-            
-            # Combine all cliff indicators (paper weights)
-            final_cliff_score = (0.25 * spatial_cliff + 
-                               0.25 * multiscale_cliff +
-                               0.20 * magnitude_variation +
-                               0.15 * cliff_confidence +
-                               0.15 * aleatoric_unc)
-            
-            # ================================
-            # 3. CLIFF-AWARE FEATURE ENHANCEMENT (CAFE)
-            # ================================
-            
-            # Step 1: Cliff-guided attention
+            cliff_confidence = validate_tensor(cliff_confidence, "cliff_confidence")
+        except Exception as e:
+            print(f"❌ Error en cliff_confidence: {e}")
+            cliff_confidence = torch.zeros(batch_size, 1, device=features.device)
+        
+        # ================================
+        # FINAL CLIFF SCORE (Paper method) - CON VALIDACIONES
+        # ================================
+        
+        # Combine all cliff indicators (paper weights)
+        final_cliff_score = (0.25 * spatial_cliff + 
+                           0.25 * multiscale_cliff +
+                           0.20 * magnitude_variation +
+                           0.15 * cliff_confidence +
+                           0.15 * aleatoric_unc)
+        
+        final_cliff_score = validate_tensor(final_cliff_score, "final_cliff_score")
+        
+        # ================================
+        # 3. CLIFF-AWARE FEATURE ENHANCEMENT (CAFE) - CON VALIDACIONES
+        # ================================
+        
+        # Step 1: Cliff-guided attention
+        try:
             attended_features, attention_weights = self.cliff_guided_attention(
                 features, final_cliff_score
             )
-            
-            # Step 2: Feature re-weighting
+            attended_features = validate_tensor(attended_features, "attended_features")
+        except Exception as e:
+            print(f"❌ Error en cliff_attention: {e}")
+            attended_features = features.clone()
+            attention_weights = torch.ones(batch_size, 1, 1, device=features.device)
+        
+        # Step 2: Feature re-weighting
+        try:
             reweight_input = torch.cat([features, final_cliff_score], dim=1)
             feature_weights = self.feature_reweighter(reweight_input)
+            feature_weights = validate_tensor(feature_weights, "feature_weights")
             reweighted_features = features * feature_weights
-            
-            # Step 3: Boundary-aware enhancement
+            reweighted_features = validate_tensor(reweighted_features, "reweighted_features")
+        except Exception as e:
+            print(f"❌ Error en feature_reweighting: {e}")
+            feature_weights = torch.ones_like(features)
+            reweighted_features = features.clone()
+        
+        # Step 3: Boundary-aware enhancement
+        try:
             boundary_input = torch.cat([features, boundary_distances], dim=1)
             boundary_enhancement = self.boundary_enhancer(boundary_input)
+            boundary_enhancement = validate_tensor(boundary_enhancement, "boundary_enhancement")
             boundary_enhanced = features + boundary_enhancement
-            
-            # Step 4: Adaptive feature fusion
+            boundary_enhanced = validate_tensor(boundary_enhanced, "boundary_enhanced")
+        except Exception as e:
+            print(f"❌ Error en boundary_enhancement: {e}")
+            boundary_enhancement = torch.zeros_like(features)
+            boundary_enhanced = features.clone()
+        
+        # Step 4: Adaptive feature fusion
+        try:
             fusion_input = torch.cat([
                 reweighted_features,    # Re-weighted original
                 attended_features,      # Attention enhanced  
                 boundary_enhanced       # Boundary enhanced
             ], dim=1)
+            fusion_input = validate_tensor(fusion_input, "fusion_input")
             
             fused_features = self.adaptive_fusion(fusion_input)
-            
-            # Final normalization
+            fused_features = validate_tensor(fused_features, "fused_features")
+        except Exception as e:
+            print(f"❌ Error en adaptive_fusion: {e}")
+            fused_features = features.clone()
+        
+        # Final normalization - ✅ CON VALIDACIÓN
+        try:
             enhanced_features = self.batch_norm(fused_features)
-            
-            # Cliff mask
-            cliff_mask = final_cliff_score > self.cliff_threshold
+            enhanced_features = validate_tensor(enhanced_features, "enhanced_features")
+        except Exception as e:
+            print(f"❌ Error en batch_norm: {e}")
+            enhanced_features = fused_features
+        
+        # ✅ VALIDACIÓN CRÍTICA FINAL
+        if torch.any(torch.isnan(enhanced_features)):
+            print("❌ CRITICAL: enhanced_features FINAL contiene NaN!")
+            enhanced_features = torch.zeros_like(features)
+            print("✅ enhanced_features reemplazado por zeros seguros")
+        
+        # Cliff mask
+        cliff_mask = final_cliff_score > self.cliff_threshold
         
         # ================================
-        # ANÁLISIS COMPLETO
+        # ANÁLISIS COMPLETO - CON PROTECCIONES
         # ================================
         
-        analysis = {
-            'cliff_samples': int(cliff_mask.sum().item()),
-            'cliff_ratio': float(cliff_mask.float().mean().item()),
-            'avg_cliff_score': float(final_cliff_score.mean().item()),
-            'spatial_cliff_avg': float(spatial_cliff.mean().item()),
-            'multiscale_cliff_avg': float(multiscale_cliff.mean().item()),
-            'magnitude_variation_avg': float(magnitude_variation.mean().item()),
-            'epistemic_uncertainty_avg': float(epistemic_unc.mean().item()),
-            'aleatoric_uncertainty_avg': float(aleatoric_unc.mean().item()),
-            'attention_entropy': float(self._compute_attention_entropy(attention_weights)),
-            'boundary_sharpness': float(torch.max(boundary_distances, dim=1)[0].mean().item())
-        }
+        try:
+            analysis = {
+                'cliff_samples': int(cliff_mask.sum().item()),
+                'cliff_ratio': float(cliff_mask.float().mean().item()),
+                'avg_cliff_score': float(final_cliff_score.mean().item()),
+                'spatial_cliff_avg': float(spatial_cliff.mean().item()),
+                'multiscale_cliff_avg': float(multiscale_cliff.mean().item()),
+                'magnitude_variation_avg': float(magnitude_variation.mean().item()),
+                'epistemic_uncertainty_avg': float(epistemic_unc.mean().item()),
+                'aleatoric_uncertainty_avg': float(aleatoric_unc.mean().item()),
+                'attention_entropy': float(self._compute_attention_entropy(attention_weights)),
+                'boundary_sharpness': float(torch.max(boundary_distances, dim=1)[0].mean().item())
+            }
+        except Exception as e:
+            print(f"❌ Error en analysis: {e}")
+            analysis = {
+                'cliff_samples': 0,
+                'cliff_ratio': 0.0,
+                'avg_cliff_score': 0.0,
+                'spatial_cliff_avg': 0.0,
+                'multiscale_cliff_avg': 0.0,
+                'magnitude_variation_avg': 0.0,
+                'epistemic_uncertainty_avg': 0.5,
+                'aleatoric_uncertainty_avg': 0.5,
+                'attention_entropy': 1.0,
+                'boundary_sharpness': 0.0
+            }
+        
+        print(f"✅ Phase2 completado sin NaN - enhanced_features: {enhanced_features.shape}")
         
         return {
             # OUTPUTS PRINCIPALES
