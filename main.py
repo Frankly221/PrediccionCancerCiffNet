@@ -215,7 +215,7 @@ def preprocess_image(image: Image.Image) -> torch.Tensor:
     img_array = (img_array - mean) / std
     
     # Convert to tensor [C, H, W]
-    img_tensor = torch.from_numpy(img_array.transpose(2, 0, 1))
+    img_tensor = torch.from_numpy(img_array.transpose(2, 0, 1)).float()
     
     # Add batch dimension [1, C, H, W]
     img_tensor = img_tensor.unsqueeze(0)
@@ -327,6 +327,9 @@ async def diagnose_lesion(
         
         # Preprocessar
         input_tensor = preprocess_image(image).to(device)
+        
+        # Añadir antes de inferencia:
+        input_tensor = input_tensor.to(next(model_instance.parameters()).dtype)
         
         # Inferencia
         with torch.no_grad():
