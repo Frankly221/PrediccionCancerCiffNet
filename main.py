@@ -140,30 +140,41 @@ async def lifespan(app: FastAPI):
         model_instance = CiffNetADCComplete(num_classes=7, cliff_threshold=0.15)
         
         # Cargar weights entrenados
-        model_path = "results/models/ciffnet_epoch_100.pth"  # Tu modelo .pth
+        model_path = "results/models/ciffnet_epoch_100.pth"
         
-        if torch.cuda.is_available():
-            checkpoint = torch.load(model_path)
-        else:
-            checkpoint = torch.load(model_path, map_location='cpu')
+        try:
+            if torch.cuda.is_available():
+                checkpoint = torch.load(model_path)
+            else:
+                checkpoint = torch.load(model_path, map_location='cpu')
+            
+            # Cargar state dict
+            if 'model_state_dict' in checkpoint:
+                model_instance.load_state_dict(checkpoint['model_state_dict'])
+            else:
+                model_instance.load_state_dict(checkpoint)
+            
+            logger.info("✅ Modelo pre-entrenado cargado")
+            
+        except FileNotFoundError:
+            logger.warning("⚠️ Modelo pre-entrenado no encontrado. Usando modelo inicializado aleatoriamente.")
+        except Exception as e:
+            logger.warning(f"⚠️ Error cargando modelo: {e}. Usando modelo inicializado.")
         
-        # Cargar state dict
-        if 'model_state_dict' in checkpoint:
-            model_instance.load_state_dict(checkpoint['model_state_dict'])
-        else:
-            model_instance.load_state_dict(checkpoint)
-        
-        # Mover a device y set eval mode
-        model_instance = model_instance.to(device)
+        # ✅ MOVER A DEVICE Y FORZAR FLOAT32 (CAMBIAR ESTA LÍNEA)
+        model_instance = model_instance.to(device).float()
         model_instance.eval()
         
-        logger.info("✅ Modelo CiffNet-ADC cargado exitosamente")
+        # ✅ LOGGING DE VERIFICACIÓN
+        logger.info("✅ Modelo CiffNet-ADC inicializado exitosamente")
+        logger.info(f"📊 Device: {device}")
+        logger.info(f"📊 Tipo de parámetros: {next(model_instance.parameters()).dtype}")
         logger.info(f"📊 Parámetros totales: {sum(p.numel() for p in model_instance.parameters()):,}")
         
         yield
         
     except Exception as e:
-        logger.error(f"❌ Error cargando modelo: {str(e)}")
+        logger.error(f"❌ Error inicializando modelo: {str(e)}")
         logger.error(traceback.format_exc())
         raise
     
@@ -205,16 +216,16 @@ def preprocess_image(image: Image.Image) -> torch.Tensor:
     if image.mode != 'RGB':
         image = image.convert('RGB')
     
-    # Convert to numpy array
+    # Convert to numpy array - ✅ ESPECIFICAR FLOAT32
     img_array = np.array(image, dtype=np.float32) / 255.0
     
-    # Normalization (ImageNet stats)
-    mean = np.array([0.485, 0.456, 0.406])
-    std = np.array([0.229, 0.224, 0.225])
+    # Normalization (ImageNet stats) - ✅ FLOAT32 EXPLÍCITO
+    mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+    std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
     
     img_array = (img_array - mean) / std
     
-    # Convert to tensor [C, H, W]
+    # Convert to tensor [C, H, W] - ✅ CAMBIAR ESTA LÍNEA
     img_tensor = torch.from_numpy(img_array.transpose(2, 0, 1)).float()
     
     # Add batch dimension [1, C, H, W]
@@ -301,13 +312,6 @@ async def diagnose_lesion(
 ):
     """
     Endpoint principal para diagnóstico de lesiones cutáneas
-    
-    Args:
-        file: Imagen de la lesión (JPG, PNG, etc.)
-        include_phase_analysis: Si incluir análisis detallado por fase
-    
-    Returns:
-        ComprehensiveResponse: Diagnóstico completo con recomendaciones
     """
     import time
     start_time = time.time()
@@ -326,10 +330,15 @@ async def diagnose_lesion(
         image = Image.open(io.BytesIO(image_data))
         
         # Preprocessar
-        input_tensor = preprocess_image(image).to(device)
+        input_tensor = preprocess_image(image)
         
-        # Añadir antes de inferencia:
-        input_tensor = input_tensor.to(next(model_instance.parameters()).dtype)
+        # ✅ ASEGURAR COMPATIBILIDAD DE TIPOS (CAMBIAR ESTAS LÍNEAS)
+        input_tensor = input_tensor.float().to(device)
+        
+        # ✅ LOGGING DE VERIFICACIÓN (OPCIONAL)
+        logger.info(f"🔍 Input tensor type: {input_tensor.dtype}")
+        logger.info(f"🔍 Input shape: {input_tensor.shape}")
+        logger.info(f"🔍 Model weight type: {next(model_instance.parameters()).dtype}")
         
         # Inferencia
         with torch.no_grad():
