@@ -1,46 +1,164 @@
 
-INFO:     127.0.0.1:64128 - "POST /diagnose HTTP/1.1" 500 Internal Server Error
+C:\Users\alexi\Desktop\ModelosIA\PrediccionCancerCiffNet>python main.py
+INFO:     Started server process [8112]
+INFO:     Waiting for application startup.
+INFO:main:🚀 Iniciando CiffNet-ADC Backend...
+INFO:main:⚠️ AUTOCAST DESHABILITADO GLOBALMENTE
+INFO:main:📱 Device detectado: cuda
+🔧 FASE 1 - Feature Extraction inicializando...
+   Backbone: efficientnet_b1
+   Pretrained: True
+INFO:timm.models._builder:Loading pretrained weights from Hugging Face hub (timm/efficientnet_b1.ra4_e3600_r240_in1k)
+INFO:timm.models._hub:[timm/efficientnet_b1.ra4_e3600_r240_in1k] Safe alternative available for 'pytorch_model.bin' (as 'model.safetensors'). Loading weights using safetensors.
+WARNING:timm.models._builder:Unexpected keys (bn2.bias, bn2.num_batches_tracked, bn2.running_mean, bn2.running_var, bn2.weight, classifier.bias, classifier.weight, conv_head.weight) found while loading pretrained weights. This may be expected if model is being adapted.
+   Dimensiones detectadas: [24, 40, 112, 320]
+   ⚡ Optimizaciones RTX 3070 aplicadas
+✅ FASE 1 creada:
+   Feature dims: [24, 40, 112, 320]
+   Total params: 6,886,176
+   Output dim: 256 (listo para Fase 2)
+🔧 FASE 2 COMPLETA - Cliff Detection según paper...
+✅ FASE 2 COMPLETA inicializada:
+   📊 CFM: Gradient + Magnitude + Boundary + Uncertainty
+   🎯 CRI: Spatial + Feature + Multi-scale + Confidence
+   🧠 CAFE: Attention + Re-weight + Boundary + Fusion
+   🔧 Total params: 1,519,310
+🔧 Creando Phase 3 Complete Classifier...
+✅ CliffAwareClassifier creado:
+   Input dim: 256
+   Num classes: 7
+   Cliff threshold: 0.15
+✅ CiffNetPhase3CompleteClassifier creado:
+   Input dim: 256
+   Num classes: 7
+   Cliff threshold: 0.15
+✅ Phase 3 Complete creada:
+   Parámetros totales: 233,359
+INFO:main:🔍 === ESTADO MODELO ANTES DE CARGAR PESOS ===
+C:\Users\alexi\Desktop\ModelosIA\PrediccionCancerCiffNet\phase2_cliff_detection_complete.py:218: UserWarning: std(): degrees of freedom is <= 0. Correction should be strictly less than the reduction factor (input numel divided by output numel). (Triggered internally at C:\actions-runner\_work\pytorch\pytorch\pytorch\aten\src\ATen\native\ReduceOps.cpp:1839.)
+  batch_std = features.std(dim=0, keepdim=True)
+INFO:phase3_classification_complete:🔍 Main logits shape: torch.Size([1, 7])
+INFO:phase3_classification_complete:🔍 Main logits values: tensor([[nan, nan, nan, nan, nan, nan, nan]], device='cuda:0')
+INFO:phase3_classification_complete:🔍 Cliff logits shape: torch.Size([1, 7])
+INFO:phase3_classification_complete:🔍 Cliff logits values: tensor([[nan, nan, nan, nan, nan, nan, nan]], device='cuda:0')
+INFO:phase3_classification_complete:🔍 Final logits shape: torch.Size([1, 7])
+INFO:phase3_classification_complete:🔍 Final logits values: tensor([[nan, nan, nan, nan, nan, nan, nan]], device='cuda:0')
+INFO:phase3_classification_complete:🔍 Probabilities shape: torch.Size([1, 7])
+INFO:phase3_classification_complete:🔍 Probabilities values: tensor([[nan, nan, nan, nan, nan, nan, nan]], device='cuda:0')
+INFO:phase3_classification_complete:🔍 Probabilities sum: tensor([nan], device='cuda:0')
+INFO:phase3_classification_complete:🔍 Predictions shape: torch.Size([1])
+INFO:phase3_classification_complete:🔍 Predictions values: tensor([0], device='cuda:0')
+INFO:phase3_classification_complete:🔍 Confidence shape: torch.Size([1])
+INFO:phase3_classification_complete:🔍 Confidence values: tensor([nan], device='cuda:0')
+INFO:main:🔍 Dummy output keys: ['phase1', 'phase2', 'phase3', 'final_prediction', 'confidence', 'uncertainty']  
+INFO:main:🔍 Phase3 dummy keys: ['logits', 'probabilities', 'predictions', 'confidence', 'uncertainty', 'enhanced_features', 'refined_features', 'cliff_scores', 'main_logits', 'cliff_logits', 'cliff_mask']
+INFO:main:🔍 Dummy predictions: tensor([0.], device='cuda:0')
+INFO:main:🔍 Dummy probabilities: tensor([[nan, nan, nan, nan, nan, nan, nan]], device='cuda:0')
+INFO:main:✅ Checkpoint cargado exitosamente
+INFO:main:🔍 Checkpoint keys: ['epoch', 'model_state_dict', 'optimizer_state_dict', 'scheduler_state_dict', 'best_val_f1', 'best_val_acc', 'config', 'history']
+INFO:main:✅ Model state dict loaded successfully
+INFO:main:✅ Modelo pre-entrenado cargado
+INFO:main:🔍 === ESTADO MODELO DESPUÉS DE CARGAR PESOS ===
+INFO:phase3_classification_complete:🔍 Main logits shape: torch.Size([1, 7])
+INFO:phase3_classification_complete:🔍 Main logits values: tensor([[nan, nan, nan, nan, nan, nan, nan]], device='cuda:0')
+INFO:phase3_classification_complete:🔍 Cliff logits shape: torch.Size([1, 7])
+INFO:phase3_classification_complete:🔍 Cliff logits values: tensor([[nan, nan, nan, nan, nan, nan, nan]], device='cuda:0')
+INFO:phase3_classification_complete:🔍 Final logits shape: torch.Size([1, 7])
+INFO:phase3_classification_complete:🔍 Final logits values: tensor([[nan, nan, nan, nan, nan, nan, nan]], device='cuda:0')
+INFO:phase3_classification_complete:🔍 Probabilities shape: torch.Size([1, 7])
+INFO:phase3_classification_complete:🔍 Probabilities values: tensor([[nan, nan, nan, nan, nan, nan, nan]], device='cuda:0')
+INFO:phase3_classification_complete:🔍 Probabilities sum: tensor([nan], device='cuda:0')
+INFO:phase3_classification_complete:🔍 Predictions shape: torch.Size([1])
+INFO:phase3_classification_complete:🔍 Predictions values: tensor([0], device='cuda:0')
+INFO:phase3_classification_complete:🔍 Confidence shape: torch.Size([1])
+INFO:phase3_classification_complete:🔍 Confidence values: tensor([nan], device='cuda:0')
+INFO:main:🔍 Predictions después de cargar: tensor([0.], device='cuda:0')
+INFO:main:🔍 Probabilities después de cargar: tensor([[nan, nan, nan, nan, nan, nan, nan]], device='cuda:0')     
+INFO:main:✅ Modelo CiffNet-ADC inicializado exitosamente
+INFO:main:📊 Device: cuda
+INFO:main:📊 Tipo de parámetros: torch.float32
+INFO:main:📊 Parámetros totales: 8,638,845
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
 INFO:main:🔍 Input tensor type: torch.float32
 INFO:main:🔍 Input shape: torch.Size([1, 3, 224, 224])
 INFO:main:🔍 Model weight type: torch.float32
-ERROR:main:❌ Error en diagnóstico: Input type (torch.cuda.HalfTensor) and weight type (torch.cuda.FloatTensor) should be the same
-ERROR:main:Traceback (most recent call last):
-  File "C:\Users\alexi\Desktop\ModelosIA\PrediccionCancerCiffNet\main.py", line 358, in diagnose_lesion
-    outputs = model_instance(input_tensor)
-  File "C:\Users\alexi\AppData\Local\Programs\Python\Python313\Lib\site-packages\torch\nn\modules\module.py", line 1751, in _wrapped_call_impl
-    return self._call_impl(*args, **kwargs)
-           ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
-  File "C:\Users\alexi\AppData\Local\Programs\Python\Python313\Lib\site-packages\torch\nn\modules\module.py", line 1762, in _call_impl
-    return forward_call(*args, **kwargs)
-  File "C:\Users\alexi\Desktop\ModelosIA\PrediccionCancerCiffNet\main.py", line 66, in forward
-    phase1_outputs = self.phase1(x)
-  File "C:\Users\alexi\AppData\Local\Programs\Python\Python313\Lib\site-packages\torch\nn\modules\module.py", line 1751, in _wrapped_call_impl
-    return self._call_impl(*args, **kwargs)
-           ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
-  File "C:\Users\alexi\AppData\Local\Programs\Python\Python313\Lib\site-packages\torch\nn\modules\module.py", line 1762, in _call_impl
-    return forward_call(*args, **kwargs)
-  File "C:\Users\alexi\Desktop\ModelosIA\PrediccionCancerCiffNet\phase1_feature_extraction.py", line 120, in forward
-    processed = processor(feat)  # [B, 256]
-  File "C:\Users\alexi\AppData\Local\Programs\Python\Python313\Lib\site-packages\torch\nn\modules\module.py", line 1751, in _wrapped_call_impl
-    return self._call_impl(*args, **kwargs)
-           ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
-  File "C:\Users\alexi\AppData\Local\Programs\Python\Python313\Lib\site-packages\torch\nn\modules\module.py", line 1762, in _call_impl
-    return forward_call(*args, **kwargs)
-  File "C:\Users\alexi\AppData\Local\Programs\Python\Python313\Lib\site-packages\torch\nn\modules\container.py", line 240, in forward
-    input = module(input)
-  File "C:\Users\alexi\AppData\Local\Programs\Python\Python313\Lib\site-packages\torch\nn\modules\module.py", line 1751, in _wrapped_call_impl
-    return self._call_impl(*args, **kwargs)
-           ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
-  File "C:\Users\alexi\AppData\Local\Programs\Python\Python313\Lib\site-packages\torch\nn\modules\module.py", line 1762, in _call_impl
-    return forward_call(*args, **kwargs)
-  File "C:\Users\alexi\AppData\Local\Programs\Python\Python313\Lib\site-packages\torch\nn\modules\conv.py", line 554, in forward
-    return self._conv_forward(input, self.weight, self.bias)
-           ~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "C:\Users\alexi\AppData\Local\Programs\Python\Python313\Lib\site-packages\torch\nn\modules\conv.py", line 549, in _conv_forward
-    return F.conv2d(
-           ~~~~~~~~^
-        input, weight, bias, self.stride, self.padding, self.dilation, self.groups
-        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-    )
-    ^
-RuntimeError: Input type (torch.cuda.HalfTensor) and weight type (torch.cuda.FloatTensor) should be the same 
+INFO:main:🔍 Autocast status: DISABLED
+INFO:phase3_classification_complete:🔍 Main logits shape: torch.Size([1, 7])
+INFO:phase3_classification_complete:🔍 Main logits values: tensor([[nan, nan, nan, nan, nan, nan, nan]], device='cuda:0')
+INFO:phase3_classification_complete:🔍 Cliff logits shape: torch.Size([1, 7])
+INFO:phase3_classification_complete:🔍 Cliff logits values: tensor([[nan, nan, nan, nan, nan, nan, nan]], device='cuda:0')
+INFO:phase3_classification_complete:🔍 Final logits shape: torch.Size([1, 7])
+INFO:phase3_classification_complete:🔍 Final logits values: tensor([[nan, nan, nan, nan, nan, nan, nan]], device='cuda:0')
+INFO:phase3_classification_complete:🔍 Probabilities shape: torch.Size([1, 7])
+INFO:phase3_classification_complete:🔍 Probabilities values: tensor([[nan, nan, nan, nan, nan, nan, nan]], device='cuda:0')
+INFO:phase3_classification_complete:🔍 Probabilities sum: tensor([nan], device='cuda:0')
+INFO:phase3_classification_complete:🔍 Predictions shape: torch.Size([1])
+INFO:phase3_classification_complete:🔍 Predictions values: tensor([0], device='cuda:0')
+INFO:phase3_classification_complete:🔍 Confidence shape: torch.Size([1])
+INFO:phase3_classification_complete:🔍 Confidence values: tensor([nan], device='cuda:0')
+INFO:main:🔍 === DEBUGGING OUTPUTS COMPLETO ===
+INFO:main:🔍 Keys en outputs: ['phase1', 'phase2', 'phase3', 'final_prediction', 'confidence', 'uncertainty']    
+INFO:main:🔍 Keys en phase3_out: ['logits', 'probabilities', 'predictions', 'confidence', 'uncertainty', 'enhanced_features', 'refined_features', 'cliff_scores', 'main_logits', 'cliff_logits', 'cliff_mask']
+INFO:main:🔍 Keys en phase2_out: ['enhanced_features', 'cliff_score', 'cliff_mask', 'local_gradients', 'magnitude_variation', 'boundary_distances', 'epistemic_uncertainty', 'aleatoric_uncertainty', 'spatial_cliff', 'feature_cliff_map', 'multiscale_cliff', 'multiscale_components', 'cliff_confidence', 'attended_features', 'attention_weights', 'feature_weights', 'boundary_enhancement', 'analysis']
+INFO:main:🔍 phase3['logits'] - shape: torch.Size([1, 7]), dtype: torch.float32
+INFO:main:🔍 phase3['logits'] - min: nan, max: nan, mean: nan
+INFO:main:🔍 phase3['logits'] - values: tensor([[nan, nan, nan, nan, nan, nan, nan]])
+INFO:main:🔍 phase3['probabilities'] - shape: torch.Size([1, 7]), dtype: torch.float32
+INFO:main:🔍 phase3['probabilities'] - min: nan, max: nan, mean: nan
+INFO:main:🔍 phase3['probabilities'] - values: tensor([[nan, nan, nan, nan, nan, nan, nan]])
+INFO:main:🔍 phase3['predictions'] - shape: torch.Size([1]), dtype: torch.float32
+INFO:main:🔍 phase3['predictions'] - min: 0.000000, max: 0.000000, mean: 0.000000
+INFO:main:🔍 phase3['predictions'] - values: tensor([0.])
+INFO:main:🔍 phase3['confidence'] - shape: torch.Size([1]), dtype: torch.float32
+INFO:main:🔍 phase3['confidence'] - min: nan, max: nan, mean: nan
+INFO:main:🔍 phase3['confidence'] - values: tensor([nan])
+INFO:main:🔍 phase3['uncertainty'] - shape: torch.Size([1]), dtype: torch.float32
+INFO:main:🔍 phase3['uncertainty'] - min: nan, max: nan, mean: nan
+INFO:main:🔍 phase3['uncertainty'] - values: tensor([nan])
+INFO:main:🔍 phase3['enhanced_features'] - shape: torch.Size([1, 256]), dtype: torch.float32
+INFO:main:🔍 phase3['enhanced_features'] - min: nan, max: nan, mean: nan
+INFO:main:🔍 phase3['enhanced_features'] - first values: tensor([nan, nan, nan, nan, nan, nan, nan, nan, nan, nan])
+INFO:main:🔍 phase3['refined_features'] - shape: torch.Size([1, 256]), dtype: torch.float32
+INFO:main:🔍 phase3['refined_features'] - min: nan, max: nan, mean: nan
+INFO:main:🔍 phase3['refined_features'] - first values: tensor([nan, nan, nan, nan, nan, nan, nan, nan, nan, nan])
+INFO:main:🔍 phase3['cliff_scores'] - shape: torch.Size([1, 1]), dtype: torch.float32
+INFO:main:🔍 phase3['cliff_scores'] - min: nan, max: nan, mean: nan
+INFO:main:🔍 phase3['cliff_scores'] - values: tensor([[nan]])
+INFO:main:🔍 phase3['main_logits'] - shape: torch.Size([1, 7]), dtype: torch.float32
+INFO:main:🔍 phase3['main_logits'] - min: nan, max: nan, mean: nan
+INFO:main:🔍 phase3['main_logits'] - values: tensor([[nan, nan, nan, nan, nan, nan, nan]])
+INFO:main:🔍 phase3['cliff_logits'] - shape: torch.Size([1, 7]), dtype: torch.float32
+INFO:main:🔍 phase3['cliff_logits'] - min: nan, max: nan, mean: nan
+INFO:main:🔍 phase3['cliff_logits'] - values: tensor([[nan, nan, nan, nan, nan, nan, nan]])
+INFO:main:🔍 phase3['cliff_mask'] - shape: torch.Size([1]), dtype: torch.float32
+INFO:main:🔍 phase3['cliff_mask'] - min: 0.000000, max: 0.000000, mean: 0.000000
+INFO:main:🔍 phase3['cliff_mask'] - values: tensor([0.])
+INFO:main:✅ Found 'predictions' tensor: tensor([0.])
+INFO:main:✅ Found 'probabilities' tensor: tensor([[nan, nan, nan, nan, nan, nan, nan]])
+INFO:main:✅ Found 'confidence': tensor([nan])
+INFO:main:✅ Found 'uncertainty': tensor([nan])
+INFO:main:✅ Extracted predicted_class_idx: 0
+INFO:main:✅ Raw probabilities shape: (7,)
+INFO:main:✅ Raw probabilities values: [nan nan nan nan nan nan nan]
+WARNING:main:⚠️ Probabilidad inválida en índice 0: nan
+WARNING:main:⚠️ Probabilidad inválida en índice 1: nan
+WARNING:main:⚠️ Probabilidad inválida en índice 2: nan
+WARNING:main:⚠️ Probabilidad inválida en índice 3: nan
+WARNING:main:⚠️ Probabilidad inválida en índice 4: nan
+WARNING:main:⚠️ Probabilidad inválida en índice 5: nan
+WARNING:main:⚠️ Probabilidad inválida en índice 6: nan
+INFO:main:✅ Sum of probabilities: 1.0
+INFO:main:✅ Index con probabilidad máxima: 0
+INFO:main:✅ Predicted class index: 0
+WARNING:main:⚠️ Valor problemático detectado: nan, usando default: 0.14285714285714285
+WARNING:main:⚠️ Valor problemático detectado: nan, usando default: 0.8571428571428572
+WARNING:main:⚠️ Valor problemático detectado: nan, usando default: 0.0
+INFO:main:✅ === RESULTADO FINAL ===
+INFO:main:✅ Predicted class: Melanoma (index: 0)
+INFO:main:✅ Confidence: 0.1429
+INFO:main:✅ Uncertainty: 0.8571
+INFO:main:✅ Class probabilities: {'Melanoma': 0.14285714285714285, 'Nevus': 0.14285714285714285, 'Basal Cell Carcinoma': 0.14285714285714285, 'Actinic Keratosis': 0.14285714285714285, 'Benign Keratosis': 0.14285714285714285, 'Dermatofibroma': 0.14285714285714285, 'Vascular Lesion': 0.14285714285714285}
+INFO:main:✅ Cliff case: False
+INFO:main:✅ Diagnóstico completado: Melanoma (conf: 0.143, unc: 0.857)
+INFO:     127.0.0.1:55793 - "POST /diagnose HTTP/1.1" 200 OK
