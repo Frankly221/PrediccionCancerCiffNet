@@ -2,153 +2,200 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, Dataset
-import logging
-import time
+import pandas as pd
 from PIL import Image
 import torchvision.transforms as transforms
 import os
 from pathlib import Path
+from sklearn.model_selection import train_test_split
 
 # Importar tu modelo
 from main import CiffNetADCComplete
 
-class QuickDataset(Dataset):
-    """Dataset simple para fine-tuning"""
+class HAM10000Dataset(Dataset):
+    """Dataset para HAM10000 con archivo CSV y carpetas de imágenes"""
     
-    def __init__(self, data_dir, transform=None):
-        self.data_dir = Path(data_dir)
+    def __init__(self, csv_file, image_folders, transform=None, split='train', test_size=0.2, random_state=42):
+        self.image_folders = [Path(folder) for folder in image_folders]
         self.transform = transform
         
-        # Buscar todas las imágenes
-        self.images = []
-        self.labels = []
+        print(f"📊 Cargando HAM10000 metadata desde: {csv_file}")
+        self.metadata = pd.read_csv(csv_file)
         
-        # Mapeo de carpetas a clases (ajusta según tu estructura)
-        class_mapping = {
-            'melanoma': 0, 'nevus': 1, 'basal_cell_carcinoma': 2,
-            'actinic_keratosis': 3, 'benign_keratosis': 4, 
-            'dermatofibroma': 5, 'vascular_lesion': 6
+        # Mapeo HAM10000 -> CiffNet clases
+        self.class_mapping = {
+            'mel': 0,     # Melanoma
+            'nv': 1,      # Nevus melanocítico  
+            'bcc': 2,     # Carcinoma basocelular
+            'akiec': 3,   # Queratosis actínica
+            'bkl': 4,     # Queratosis seborreica (benigna)
+            'df': 5,      # Dermatofibroma
+            'vasc': 6     # Lesiones vasculares
         }
         
-        for class_name, class_idx in class_mapping.items():
-            class_dir = self.data_dir / class_name
-            if class_dir.exists():
-                for img_path in class_dir.glob('*.jpg'):
-                    self.images.append(str(img_path))
-                    self.labels.append(class_idx)
+        self.class_names = [
+            'Melanoma', 'Nevus', 'Basal Cell Carcinoma', 
+            'Actinic Keratosis', 'Benign Keratosis', 
+            'Dermatofibroma', 'Vascular Lesion'
+        ]
         
-        print(f"📊 Dataset cargado: {len(self.images)} imágenes")
+        # Filtrar diagnósticos válidos
+        valid_dx = list(self.class_mapping.keys())
+        self.metadata = self.metadata[self.metadata['dx'].isin(valid_dx)]
+        print(f"✅ Metadata filtrada: {len(self.metadata)} muestras válidas")
+        
+        # Split train/validation estratificado
+        if len(self.metadata) > 0:
+            train_df, val_df = train_test_split(
+                self.metadata, 
+                test_size=test_size, 
+                random_state=random_state,
+                stratify=self.metadata['dx']
+            )
+            
+            self.data = train_df.reset_index(drop=True) if split == 'train' else val_df.reset_index(drop=True)
+        else:
+            self.data = pd.DataFrame()
+        
+        # Validar que las imágenes existen
+        self.valid_samples = []
+        self._validate_images()
+        
+        print(f"📊 HAM10000 {split}: {len(self.valid_samples)} imágenes válidas")
+        self._print_class_distribution()
+    
+    def _validate_images(self):
+        """Validar que las imágenes existen en las carpetas"""
+        missing_count = 0
+        found_count = 0
+        
+        for idx, row in self.data.iterrows():
+            image_id = row['image_id']
+            dx = row['dx']
+            
+            # Buscar imagen en las carpetas
+            image_path = self._find_image_path(image_id)
+            
+            if image_path and image_path.exists():
+                self.valid_samples.append({
+                    'image_path': image_path,
+                    'label': self.class_mapping[dx],
+                    'class_name': self.class_names[self.class_mapping[dx]],
+                    'diagnosis': dx,
+                    'image_id': image_id
+                })
+                found_count += 1
+            else:
+                missing_count += 1
+        
+        print(f"✅ Imágenes encontradas: {found_count}")
+        if missing_count > 0:
+            print(f"⚠️ Imágenes faltantes: {missing_count}")
+    
+    def _find_image_path(self, image_id):
+        """Buscar imagen en las carpetas HAM10000"""
+        extensions = ['.jpg', '.jpeg', '.png', '.JPG', '.JPEG', '.PNG']
+        
+        for folder in self.image_folders:
+            if folder.exists():
+                for ext in extensions:
+                    image_path = folder / f"{image_id}{ext}"
+                    if image_path.exists():
+                        return image_path
+        return None
+    
+    def _print_class_distribution(self):
+        """Mostrar distribución de clases"""
+        if len(self.valid_samples) > 0:
+            class_counts = {}
+            for sample in self.valid_samples:
+                class_name = sample['class_name']
+                class_counts[class_name] = class_counts.get(class_name, 0) + 1
+            
+            print("📊 Distribución de clases:")
+            total = len(self.valid_samples)
+            for class_name, count in sorted(class_counts.items()):
+                percentage = (count / total) * 100
+                print(f"   {class_name}: {count} ({percentage:.1f}%)")
     
     def __len__(self):
-        return len(self.images)
+        return len(self.valid_samples)
     
     def __getitem__(self, idx):
-        img_path = self.images[idx]
-        label = self.labels[idx]
+        sample = self.valid_samples[idx]
+        image_path = sample['image_path']
+        label = sample['label']
         
-        image = Image.open(img_path).convert('RGB')
-        if self.transform:
-            image = self.transform(image)
-        
-        return image, label
+        try:
+            image = Image.open(image_path).convert('RGB')
+            if self.transform:
+                image = self.transform(image)
+            return image, label
+            
+        except Exception as e:
+            print(f"❌ Error cargando {image_path}: {e}")
+            # Imagen en blanco como fallback
+            blank_image = Image.new('RGB', (224, 224), color=(128, 128, 128))
+            if self.transform:
+                blank_image = self.transform(blank_image)
+            return blank_image, label
 
-class CiffNetFineTuner:
-    """Fine-tuner especializado para CiffNet después de correcciones"""
+class CiffNetHAMFineTuner:
+    """Fine-tuner para CiffNet con HAM10000"""
     
     def __init__(self, model_path, device='cuda'):
         self.device = torch.device(device if torch.cuda.is_available() else 'cpu')
         print(f"🎯 Usando device: {self.device}")
         
-        # Cargar modelo con correcciones
+        # Cargar modelo
         self.model = CiffNetADCComplete(num_classes=7, cliff_threshold=0.15)
-        
-        # Cargar pesos existentes (con manejo de errores)
         self.load_pretrained_weights(model_path)
-        
         self.model = self.model.to(self.device)
-        
-        # ✅ ESTRATEGIA: CONGELAR PHASE 1, ENTRENAR PHASE 2 Y 3
         self.setup_training_strategy()
     
     def load_pretrained_weights(self, model_path):
-        """Cargar pesos con manejo inteligente de incompatibilidades"""
+        """Cargar pesos existentes"""
         try:
             checkpoint = torch.load(model_path, map_location='cpu')
-            
-            if 'model_state_dict' in checkpoint:
-                pretrained_dict = checkpoint['model_state_dict']
-            else:
-                pretrained_dict = checkpoint
+            pretrained_dict = checkpoint.get('model_state_dict', checkpoint)
             
             model_dict = self.model.state_dict()
+            compatible_dict = {k: v for k, v in pretrained_dict.items() 
+                             if k in model_dict and v.shape == model_dict[k].shape}
             
-            # ✅ CARGAR SOLO PESOS COMPATIBLES
-            compatible_dict = {}
-            incompatible_keys = []
-            
-            for key, value in pretrained_dict.items():
-                if key in model_dict:
-                    if value.shape == model_dict[key].shape:
-                        compatible_dict[key] = value
-                    else:
-                        incompatible_keys.append(f"{key}: {value.shape} vs {model_dict[key].shape}")
-                else:
-                    incompatible_keys.append(f"{key}: not found in new model")
-            
-            # Actualizar con pesos compatibles
             model_dict.update(compatible_dict)
             self.model.load_state_dict(model_dict)
             
-            print(f"✅ Pesos cargados:")
-            print(f"   Compatible: {len(compatible_dict)}/{len(pretrained_dict)} pesos")
-            print(f"   Incompatible: {len(incompatible_keys)} pesos")
-            
-            if incompatible_keys:
-                print("⚠️ Claves incompatibles (serán reinicializadas):")
-                for key in incompatible_keys[:5]:  # Mostrar solo los primeros 5
-                    print(f"     {key}")
-                if len(incompatible_keys) > 5:
-                    print(f"     ... y {len(incompatible_keys) - 5} más")
+            print(f"✅ Pesos cargados: {len(compatible_dict)}/{len(pretrained_dict)} compatibles")
             
         except Exception as e:
             print(f"⚠️ Error cargando pesos: {e}")
-            print("🔄 Usando inicialización aleatoria")
     
     def setup_training_strategy(self):
-        """Configurar estrategia de entrenamiento selectivo"""
-        
-        # ✅ CONGELAR PHASE 1 (EfficientNet ya está bien entrenado)
+        """Configurar estrategia de entrenamiento"""
+        # Congelar Phase 1 backbone
         for name, param in self.model.named_parameters():
             if 'phase1' in name and 'backbone' in name:
                 param.requires_grad = False
         
-        # ✅ ENTRENAR SOLO CAPAS ESPECÍFICAS
-        trainable_params = []
-        frozen_params = 0
-        
-        for name, param in self.model.named_parameters():
-            if param.requires_grad:
-                trainable_params.append(param)
-            else:
-                frozen_params += param.numel()
-        
-        total_trainable = sum(p.numel() for p in trainable_params)
+        trainable = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
+        frozen = sum(p.numel() for p in self.model.parameters() if not p.requires_grad)
         
         print(f"🎯 Estrategia de entrenamiento:")
-        print(f"   Parámetros congelados: {frozen_params:,}")
-        print(f"   Parámetros entrenables: {total_trainable:,}")
-        print(f"   Ratio entrenamiento: {total_trainable/(total_trainable+frozen_params)*100:.1f}%")
-        
-        return trainable_params
+        print(f"   Parámetros congelados: {frozen:,}")
+        print(f"   Parámetros entrenables: {trainable:,}")
+        print(f"   Ratio entrenamiento: {trainable/(trainable+frozen)*100:.1f}%")
     
-    def create_data_loaders(self, train_dir, val_dir=None, batch_size=8):
-        """Crear data loaders para fine-tuning"""
+    def create_data_loaders(self, csv_file, image_folders, batch_size=8, test_size=0.2):
+        """Crear data loaders para HAM10000"""
         
-        # ✅ TRANSFORMS CONSERVADORES (no data augmentation agresivo)
+        # Transformaciones
         train_transform = transforms.Compose([
             transforms.Resize((224, 224)),
-            transforms.RandomHorizontalFlip(p=0.3),  # Mínimo augmentation
-            transforms.ColorJitter(brightness=0.1, contrast=0.1),
+            transforms.RandomHorizontalFlip(p=0.3),
+            transforms.RandomVerticalFlip(p=0.1),
+            transforms.RandomRotation(degrees=10),
+            transforms.ColorJitter(brightness=0.1, contrast=0.1, saturation=0.1),
             transforms.ToTensor(),
             transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
         ])
@@ -160,58 +207,52 @@ class CiffNetFineTuner:
         ])
         
         # Crear datasets
-        train_dataset = QuickDataset(train_dir, transform=train_transform)
+        train_dataset = HAM10000Dataset(
+            csv_file=csv_file,
+            image_folders=image_folders,
+            transform=train_transform,
+            split='train',
+            test_size=test_size
+        )
         
-        if val_dir and os.path.exists(val_dir):
-            val_dataset = QuickDataset(val_dir, transform=val_transform)
-        else:
-            # Split del train dataset
-            train_size = int(0.8 * len(train_dataset))
-            val_size = len(train_dataset) - train_size
-            train_dataset, val_dataset = torch.utils.data.random_split(
-                train_dataset, [train_size, val_size]
-            )
+        val_dataset = HAM10000Dataset(
+            csv_file=csv_file,
+            image_folders=image_folders,
+            transform=val_transform,
+            split='val',
+            test_size=test_size
+        )
         
-        # Crear data loaders
+        # Verificar datos
+        if len(train_dataset) == 0:
+            raise ValueError("❌ No hay imágenes de entrenamiento")
+        if len(val_dataset) == 0:
+            raise ValueError("❌ No hay imágenes de validación")
+        
+        # Data loaders
         train_loader = DataLoader(
-            train_dataset, 
-            batch_size=batch_size, 
-            shuffle=True, 
-            num_workers=2,
-            pin_memory=True if torch.cuda.is_available() else False
+            train_dataset, batch_size=batch_size, shuffle=True, 
+            num_workers=0, pin_memory=torch.cuda.is_available()
         )
         
         val_loader = DataLoader(
-            val_dataset, 
-            batch_size=batch_size, 
-            shuffle=False, 
-            num_workers=2,
-            pin_memory=True if torch.cuda.is_available() else False
+            val_dataset, batch_size=batch_size, shuffle=False,
+            num_workers=0, pin_memory=torch.cuda.is_available()
         )
+        
+        print(f"✅ DataLoaders HAM10000 creados:")
+        print(f"   Train: {len(train_loader)} batches ({len(train_dataset)} muestras)")
+        print(f"   Val: {len(val_loader)} batches ({len(val_dataset)} muestras)")
         
         return train_loader, val_loader
     
     def fine_tune(self, train_loader, val_loader, epochs=5, lr=1e-5):
-        """Proceso de fine-tuning principal"""
+        """Fine-tuning process"""
+        print(f"🚀 Iniciando fine-tuning HAM10000 - {epochs} epochs, LR={lr}")
         
-        print(f"🚀 Iniciando fine-tuning por {epochs} epochs con LR={lr}")
-        
-        # ✅ OPTIMIZER CONSERVADOR
         trainable_params = [p for p in self.model.parameters() if p.requires_grad]
-        optimizer = optim.AdamW(
-            trainable_params, 
-            lr=lr, 
-            weight_decay=1e-4,
-            betas=(0.9, 0.999)
-        )
-        
-        # ✅ SCHEDULER SUAVE
-        scheduler = optim.lr_scheduler.CosineAnnealingLR(
-            optimizer, 
-            T_max=epochs, 
-            eta_min=lr/10
-        )
-        
+        optimizer = optim.AdamW(trainable_params, lr=lr, weight_decay=1e-4)
+        scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=lr/10)
         criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
         
         best_val_acc = 0.0
@@ -221,42 +262,34 @@ class CiffNetFineTuner:
             print(f"\n📊 Epoch {epoch+1}/{epochs}")
             print("-" * 50)
             
-            # TRAINING
+            # Training
             train_metrics = self.train_epoch(train_loader, optimizer, criterion)
             
-            # VALIDATION  
+            # Validation
             val_metrics = self.validate_epoch(val_loader, criterion)
             
-            # SCHEDULER STEP
             scheduler.step()
             
-            # GUARDAR MEJOR MODELO
+            # Save best model
             if val_metrics['accuracy'] > best_val_acc:
                 best_val_acc = val_metrics['accuracy']
                 best_model_state = self.model.state_dict().copy()
-                print(f"✅ Nuevo mejor modelo: {best_val_acc:.2f}% accuracy")
+                print(f"✅ Nuevo mejor modelo: {best_val_acc:.2f}%")
             
-            # LOGGING
             print(f"Train - Loss: {train_metrics['loss']:.4f}, Acc: {train_metrics['accuracy']:.2f}%")
             print(f"Val   - Loss: {val_metrics['loss']:.4f}, Acc: {val_metrics['accuracy']:.2f}%")
-            print(f"LR: {optimizer.param_groups[0]['lr']:.2e}")
         
-        # CARGAR MEJOR MODELO
-        if best_model_state is not None:
+        # Load best model
+        if best_model_state:
             self.model.load_state_dict(best_model_state)
-            print(f"\n✅ Fine-tuning completado!")
-            print(f"   Mejor accuracy: {best_val_acc:.2f}%")
+            print(f"\n✅ Fine-tuning completado! Mejor accuracy: {best_val_acc:.2f}%")
         
         return best_val_acc
     
     def train_epoch(self, train_loader, optimizer, criterion):
-        """Entrenar una época"""
+        """Entrenar época"""
         self.model.train()
-        
-        total_loss = 0.0
-        correct = 0
-        total = 0
-        batch_count = 0
+        total_loss, correct, total, batch_count = 0.0, 0, 0, 0
         
         for batch_idx, (data, targets) in enumerate(train_loader):
             data, targets = data.to(self.device), targets.to(self.device)
@@ -264,30 +297,21 @@ class CiffNetFineTuner:
             optimizer.zero_grad()
             
             try:
-                # ✅ FORWARD CON VALIDACIONES
                 outputs = self.model(data)
                 probabilities = outputs['phase3']['probabilities']
                 
-                # ✅ VALIDAR QUE NO HAY NaN
                 if torch.any(torch.isnan(probabilities)):
-                    print(f"⚠️ NaN detectado en batch {batch_idx}, saltando...")
                     continue
                 
-                # LOSS
                 loss = criterion(probabilities, targets)
-                
-                # BACKWARD
                 loss.backward()
                 
-                # ✅ GRADIENT CLIPPING CONSERVADOR
                 torch.nn.utils.clip_grad_norm_(
-                    [p for p in self.model.parameters() if p.requires_grad], 
-                    max_norm=1.0
+                    [p for p in self.model.parameters() if p.requires_grad], max_norm=1.0
                 )
                 
                 optimizer.step()
                 
-                # MÉTRICAS
                 total_loss += loss.item()
                 batch_count += 1
                 
@@ -295,15 +319,12 @@ class CiffNetFineTuner:
                 total += targets.size(0)
                 correct += (pred_classes == targets).sum().item()
                 
-                # LOGGING CADA 10 BATCHES
-                if batch_idx % 10 == 0:
+                if batch_idx % 20 == 0:
                     current_acc = 100. * correct / total if total > 0 else 0
-                    print(f"  Batch {batch_idx:3d}/{len(train_loader)} | "
-                          f"Loss: {loss.item():.4f} | "
-                          f"Acc: {current_acc:.1f}%")
+                    print(f"  Batch {batch_idx:3d} | Loss: {loss.item():.4f} | Acc: {current_acc:.1f}%")
             
             except Exception as e:
-                print(f"❌ Error en batch {batch_idx}: {e}")
+                print(f"❌ Error batch {batch_idx}: {e}")
                 continue
         
         avg_loss = total_loss / batch_count if batch_count > 0 else 0
@@ -312,13 +333,9 @@ class CiffNetFineTuner:
         return {'loss': avg_loss, 'accuracy': accuracy}
     
     def validate_epoch(self, val_loader, criterion):
-        """Validar una época"""
+        """Validar época"""
         self.model.eval()
-        
-        total_loss = 0.0
-        correct = 0
-        total = 0
-        batch_count = 0
+        total_loss, correct, total, batch_count = 0.0, 0, 0, 0
         
         with torch.no_grad():
             for data, targets in val_loader:
@@ -332,7 +349,6 @@ class CiffNetFineTuner:
                         continue
                     
                     loss = criterion(probabilities, targets)
-                    
                     total_loss += loss.item()
                     batch_count += 1
                     
@@ -350,59 +366,82 @@ class CiffNetFineTuner:
     
     def save_fine_tuned_model(self, save_path):
         """Guardar modelo fine-tuneado"""
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
         torch.save({
             'model_state_dict': self.model.state_dict(),
-            'model_config': {
-                'num_classes': 7,
-                'cliff_threshold': 0.15
-            }
+            'model_config': {'num_classes': 7, 'cliff_threshold': 0.15}
         }, save_path)
-        print(f"✅ Modelo guardado en: {save_path}")
+        print(f"✅ Modelo guardado: {save_path}")
 
-# ✅ FUNCIÓN PRINCIPAL PARA USAR
-def run_quick_fine_tune(
+# ✅ FUNCIÓN PRINCIPAL CORREGIDA PARA HAM10000
+def run_ham10000_fine_tune(
     model_path="results/models/ciffnet_epoch_100.pth",
-    train_data_dir="data/train",  # Ajusta a tu estructura
-    val_data_dir=None,
-    save_path="results/models/ciffnet_fine_tuned.pth",
-    epochs=5,
-    batch_size=8,
-    learning_rate=1e-5
+    csv_file="datasetHam10000/HAM10000_metadata.csv",
+    image_folders=["datasetHam10000/HAM10000_images_part_1", "datasetHam10000/HAM10000_images_part_2"],
+    save_path="results/models/ciffnet_ham10000_fine_tuned.pth",
+    epochs=3,
+    batch_size=4,
+    learning_rate=5e-6
 ):
-    """
-    Función principal para ejecutar fine-tuning rápido
-    """
-    print("🚀 INICIANDO FINE-TUNING RÁPIDO DE CIFFNET")
+    """Fine-tuning con dataset HAM10000 completo"""
+    
+    print("🚀 FINE-TUNING CIFFNET CON HAM10000")
     print("=" * 60)
     
-    # Crear fine-tuner
-    fine_tuner = CiffNetFineTuner(model_path)
+    # Verificar que los archivos existen
+    if not os.path.exists(csv_file):
+        print(f"❌ CSV no encontrado: {csv_file}")
+        return None
     
-    # Crear data loaders
-    train_loader, val_loader = fine_tuner.create_data_loaders(
-        train_data_dir, val_data_dir, batch_size
-    )
+    for folder in image_folders:
+        if not os.path.exists(folder):
+            print(f"❌ Carpeta no encontrada: {folder}")
+            return None
     
-    # Fine-tuning
-    best_acc = fine_tuner.fine_tune(
-        train_loader, val_loader, epochs, learning_rate
-    )
+    print(f"✅ Archivos HAM10000 verificados")
     
-    # Guardar modelo
-    fine_tuner.save_fine_tuned_model(save_path)
-    
-    print(f"\n🎯 FINE-TUNING COMPLETADO")
-    print(f"   Mejor accuracy: {best_acc:.2f}%")
-    print(f"   Modelo guardado: {save_path}")
-    
-    return fine_tuner.model
+    try:
+        # Crear fine-tuner
+        fine_tuner = CiffNetHAMFineTuner(model_path)
+        
+        # Crear data loaders
+        train_loader, val_loader = fine_tuner.create_data_loaders(
+            csv_file, image_folders, batch_size
+        )
+        
+        # Fine-tuning
+        best_acc = fine_tuner.fine_tune(train_loader, val_loader, epochs, learning_rate)
+        
+        # Guardar modelo
+        fine_tuner.save_fine_tuned_model(save_path)
+        
+        print(f"\n🎯 FINE-TUNING HAM10000 COMPLETADO")
+        print(f"   Mejor accuracy: {best_acc:.2f}%")
+        print(f"   Modelo guardado: {save_path}")
+        
+        return fine_tuner.model
+        
+    except Exception as e:
+        print(f"❌ Error durante fine-tuning: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
 
 if __name__ == "__main__":
-    # ✅ EJECUTAR FINE-TUNING
-    model = run_quick_fine_tune(
+    # ✅ EJECUTAR FINE-TUNING CON HAM10000
+    model = run_ham10000_fine_tune(
         model_path="results/models/ciffnet_epoch_100.pth",
-        train_data_dir="data/train",  # CAMBIAR A TU RUTA
-        epochs=3,  # Solo 3 epochs para prueba rápida
-        batch_size=4,  # Batch pequeño para empezar
-        learning_rate=5e-6  # LR muy conservador
+        csv_file="datasetHam10000/HAM10000_metadata.csv",
+        image_folders=[
+            "datasetHam10000/HAM10000_images_part_1", 
+            "datasetHam10000/HAM10000_images_part_2"
+        ],
+        epochs=3,
+        batch_size=4,
+        learning_rate=5e-6
     )
+    
+    if model:
+        print("✅ ¡Fine-tuning exitoso! El modelo está listo para usar.")
+    else:
+        print("❌ Fine-tuning falló. Revisa los errores arriba.")
