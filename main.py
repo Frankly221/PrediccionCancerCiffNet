@@ -210,7 +210,7 @@ async def lifespan(app: FastAPI):
                 logger.info(f"🔍 Dummy probabilities: {phase3_dummy['probabilities']}")
         
         # Cargar weights entrenados
-        model_path = "results/models/ciffnet_epoch_100.pth"
+        model_path = "results/models/ciffnet_ham100000_fine_tuned.pth"
         
         try:
             if torch.cuda.is_available():
