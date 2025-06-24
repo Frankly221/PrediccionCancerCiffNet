@@ -56,30 +56,45 @@ class CiffNetADCComplete(nn.Module):
             'Vascular Lesion': 'LOW'
         }
     
+    def _force_float32_recursive(self, obj):
+        """
+        Fuerza recursivamente todos los tensors a float32
+        """
+        if isinstance(obj, torch.Tensor):
+            return obj.float()
+        elif isinstance(obj, dict):
+            return {k: self._force_float32_recursive(v) for k, v in obj.items()}
+        elif isinstance(obj, (list, tuple)):
+            return type(obj)(self._force_float32_recursive(item) for item in obj)
+        else:
+            return obj
+    
     def forward(self, x):
         """Forward pass completo a través de las 3 fases"""
         
-        # ✅ ASEGURAR TIPO CONSISTENTE ANTES DE PHASE1
-        x = x.float()  # Forzar float32 antes de cualquier procesamiento
+        # ✅ FORZAR FLOAT32 DESDE EL INICIO
+        x = x.float()
         
-        # FASE 1: Feature Extraction
-        phase1_outputs = self.phase1(x)
-        
-        # ✅ ASEGURAR TIPO CONSISTENTE DESPUÉS DE PHASE1
-        for key, value in phase1_outputs.items():
-            if isinstance(value, torch.Tensor):
-                phase1_outputs[key] = value.float()
-        
-        # FASE 2: Cliff Detection & Enhancement
-        phase2_outputs = self.phase2(phase1_outputs['fused_features'])
-        
-        # ✅ ASEGURAR TIPO CONSISTENTE DESPUÉS DE PHASE2
-        for key, value in phase2_outputs.items():
-            if isinstance(value, torch.Tensor):
-                phase2_outputs[key] = value.float()
-        
-        # FASE 3: Cliff-Aware Classification
-        phase3_outputs = self.phase3(phase2_outputs, return_all=True)
+        # ✅ DESHABILITAR AUTOCAST COMPLETAMENTE DURANTE ESTE FORWARD
+        with torch.cuda.amp.autocast(enabled=False):
+            
+            # FASE 1: Feature Extraction
+            phase1_outputs = self.phase1(x)
+            
+            # ✅ FORZAR FLOAT32 EN TODOS LOS OUTPUTS DE PHASE1
+            phase1_outputs = self._force_float32_recursive(phase1_outputs)
+            
+            # FASE 2: Cliff Detection & Enhancement  
+            phase2_outputs = self.phase2(phase1_outputs['fused_features'])
+            
+            # ✅ FORZAR FLOAT32 EN TODOS LOS OUTPUTS DE PHASE2
+            phase2_outputs = self._force_float32_recursive(phase2_outputs)
+            
+            # FASE 3: Cliff-Aware Classification
+            phase3_outputs = self.phase3(phase2_outputs, return_all=True)
+            
+            # ✅ FORZAR FLOAT32 EN TODOS LOS OUTPUTS DE PHASE3
+            phase3_outputs = self._force_float32_recursive(phase3_outputs)
         
         return {
             'phase1': phase1_outputs,
@@ -174,15 +189,35 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning(f"⚠️ Error cargando modelo: {e}. Usando modelo inicializado.")
         
-        # ✅ MOVER A DEVICE Y FORZAR FLOAT32 (CAMBIAR ESTA LÍNEA)
+        # ✅ FORZAR TODO EL MODELO A FLOAT32
         model_instance = model_instance.to(device).float()
+        
+        # ✅ FORZAR RECURSIVAMENTE TODOS LOS SUBMÓDULOS A FLOAT32
+        def force_float32_modules(module):
+            for child in module.children():
+                force_float32_modules(child)
+            # Forzar parámetros a float32
+            for param in module.parameters(recurse=False):
+                param.data = param.data.float()
+            # Forzar buffers a float32
+            for buffer in module.buffers(recurse=False):
+                buffer.data = buffer.data.float()
+        
+        force_float32_modules(model_instance)
         model_instance.eval()
         
-        # ✅ LOGGING DE VERIFICACIÓN
+        # ✅ DESHABILITAR AUTOCAST GLOBALMENTE
+        torch.backends.cudnn.allow_tf32 = False
+        torch.backends.cuda.matmul.allow_tf32 = False
+        
         logger.info("✅ Modelo CiffNet-ADC inicializado exitosamente")
         logger.info(f"📊 Device: {device}")
         logger.info(f"📊 Tipo de parámetros: {next(model_instance.parameters()).dtype}")
         logger.info(f"📊 Parámetros totales: {sum(p.numel() for p in model_instance.parameters()):,}")
+        
+        # ✅ VERIFICAR QUE TODOS LOS PARÁMETROS SEAN FLOAT32
+        all_float32 = all(p.dtype == torch.float32 for p in model_instance.parameters())
+        logger.info(f"📊 Todos los parámetros en float32: {all_float32}")
         
         yield
         
