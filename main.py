@@ -448,22 +448,69 @@ async def diagnose_lesion(
         phase3_out = outputs['phase3']
         phase2_out = outputs['phase2']
         
-        # Convertir a CPU y extraer valores
-        predictions = phase3_out['predictions'].cpu().numpy()[0]
-        probabilities = phase3_out['probabilities'].cpu().numpy()[0]
-        confidence = float(phase3_out['confidence'].cpu().numpy()[0])
-        uncertainty = float(phase3_out['uncertainty'].cpu().numpy()[0])
+        # ✅ CORREGIR EXTRACCIÓN DE PREDICTIONS
+        # Convertir a CPU y extraer valores correctamente
+        predictions_tensor = phase3_out['predictions'].cpu()
+        probabilities_tensor = phase3_out['probabilities'].cpu()
+        confidence_tensor = phase3_out['confidence'].cpu()
+        uncertainty_tensor = phase3_out['uncertainty'].cpu()
         
-        # Cliff analysis
-        cliff_score = float(phase2_out['cliff_score'].cpu().numpy()[0])
-        is_cliff_case = bool(phase2_out['cliff_mask'].cpu().numpy()[0])
+        # ✅ DEBUGGING: Ver qué contienen los tensors
+        logger.info(f"🔍 Predictions tensor shape: {predictions_tensor.shape}")
+        logger.info(f"🔍 Predictions tensor dtype: {predictions_tensor.dtype}")
+        logger.info(f"🔍 Predictions tensor values: {predictions_tensor}")
         
-        # Uncertainty breakdown
-        epistemic_unc = float(phase2_out['epistemic_uncertainty'].cpu().numpy()[0].mean())
-        aleatoric_unc = float(phase2_out['aleatoric_uncertainty'].cpu().numpy()[0])
+        # ✅ EXTRAER CORRECTAMENTE EL ÍNDICE DE CLASE
+        if predictions_tensor.dim() > 0:
+            # Si es un tensor con batch dimension
+            predicted_class_idx = int(predictions_tensor[0].item()) if predictions_tensor.shape[0] > 0 else int(predictions_tensor.item())
+        else:
+            # Si es un scalar tensor
+            predicted_class_idx = int(predictions_tensor.item())
+        
+        # ✅ EXTRAER PROBABILIDADES CORRECTAMENTE
+        if probabilities_tensor.dim() > 1:
+            probabilities = probabilities_tensor[0].numpy()
+        else:
+            probabilities = probabilities_tensor.numpy()
+        
+        # ✅ EXTRAER VALORES ESCALARES CORRECTAMENTE
+        confidence = float(confidence_tensor.item() if confidence_tensor.dim() == 0 else confidence_tensor[0].item())
+        uncertainty = float(uncertainty_tensor.item() if uncertainty_tensor.dim() == 0 else uncertainty_tensor[0].item())
+        
+        # ✅ LOGGING DE VERIFICACIÓN
+        logger.info(f"🔍 Predicted class index: {predicted_class_idx} (type: {type(predicted_class_idx)})")
+        logger.info(f"🔍 Confidence: {confidence}")
+        logger.info(f"🔍 Uncertainty: {uncertainty}")
+        
+        # Cliff analysis - ✅ TAMBIÉN CORREGIR AQUÍ
+        cliff_score_tensor = phase2_out['cliff_score'].cpu()
+        cliff_mask_tensor = phase2_out['cliff_mask'].cpu()
+        
+        cliff_score = float(cliff_score_tensor.item() if cliff_score_tensor.dim() == 0 else cliff_score_tensor[0].item())
+        is_cliff_case = bool(cliff_mask_tensor.item() if cliff_mask_tensor.dim() == 0 else cliff_mask_tensor[0].item())
+        
+        # Uncertainty breakdown - ✅ CORREGIR TAMBIÉN
+        epistemic_unc_tensor = phase2_out['epistemic_uncertainty'].cpu()
+        aleatoric_unc_tensor = phase2_out['aleatoric_uncertainty'].cpu()
+        
+        # Manejar diferentes shapes para uncertainty
+        if epistemic_unc_tensor.dim() > 1:
+            epistemic_unc = float(epistemic_unc_tensor[0].mean().item())
+        elif epistemic_unc_tensor.dim() == 1:
+            epistemic_unc = float(epistemic_unc_tensor.mean().item())
+        else:
+            epistemic_unc = float(epistemic_unc_tensor.item())
+        
+        aleatoric_unc = float(aleatoric_unc_tensor.item() if aleatoric_unc_tensor.dim() == 0 else aleatoric_unc_tensor[0].item())
+        
+        # ✅ VALIDAR ÍNDICE ANTES DE USAR
+        if predicted_class_idx < 0 or predicted_class_idx >= len(model_instance.class_names):
+            logger.error(f"❌ Índice de clase inválido: {predicted_class_idx}")
+            predicted_class_idx = 0  # Fallback a primera clase
         
         # Mapear a nombres de clases
-        predicted_class = model_instance.class_names[predictions]
+        predicted_class = model_instance.class_names[predicted_class_idx]
         class_probabilities = {
             name: float(prob) 
             for name, prob in zip(model_instance.class_names, probabilities)
@@ -478,7 +525,7 @@ async def diagnose_lesion(
         # Crear resultado del diagnóstico
         diagnosis = DiagnosisResult(
             predicted_class=predicted_class,
-            predicted_class_id=int(predictions),
+            predicted_class_id=predicted_class_idx,
             confidence=confidence,
             uncertainty=uncertainty,
             risk_level=model_instance.risk_levels[predicted_class],
@@ -491,32 +538,36 @@ async def diagnose_lesion(
             confidence_level=confidence_level
         )
         
-        # Análisis por fase (opcional)
+        # Análisis por fase (opcional) - ✅ TAMBIÉN CORREGIR
         phase_analysis = None
         if include_phase_analysis:
-            phase1_out = outputs['phase1']
-            
-            phase_analysis = PhaseAnalysis(
-                phase1_features={
-                    "backbone_features_mean": float(phase1_out['fused_features'].mean()),
-                    "feature_diversity": float(torch.std(phase1_out['fused_features'])),
-                    "multi_scale_activation": float(phase1_out['multi_scale_features'].mean())
-                },
-                phase2_cliff_analysis={
-                    "cliff_score": cliff_score,
-                    "spatial_cliff": float(phase2_out['spatial_cliff'].cpu().numpy()[0]),
-                    "multiscale_cliff": float(phase2_out['multiscale_cliff'].cpu().numpy()[0]),
-                    "epistemic_uncertainty": epistemic_unc,
-                    "aleatoric_uncertainty": aleatoric_unc,
-                    "attention_entropy": phase2_out['analysis']['attention_entropy']
-                },
-                phase3_classification={
-                    "main_classifier_confidence": float(torch.max(torch.softmax(phase3_out['main_logits'], dim=1))),
-                    "cliff_classifier_confidence": float(torch.max(torch.softmax(phase3_out['cliff_logits'], dim=1))),
-                    "classifier_used": "cliff" if is_cliff_case else "main",
-                    "monte_carlo_uncertainty": uncertainty
-                }
-            )
+            try:
+                phase1_out = outputs['phase1']
+                
+                phase_analysis = PhaseAnalysis(
+                    phase1_features={
+                        "backbone_features_mean": float(phase1_out['fused_features'].mean().item()),
+                        "feature_diversity": float(torch.std(phase1_out['fused_features']).item()),
+                        "multi_scale_activation": float(phase1_out['multi_scale_features'].mean().item())
+                    },
+                    phase2_cliff_analysis={
+                        "cliff_score": cliff_score,
+                        "spatial_cliff": float(phase2_out['spatial_cliff'].cpu()[0].item() if phase2_out['spatial_cliff'].dim() > 0 else phase2_out['spatial_cliff'].cpu().item()),
+                        "multiscale_cliff": float(phase2_out['multiscale_cliff'].cpu()[0].item() if phase2_out['multiscale_cliff'].dim() > 0 else phase2_out['multiscale_cliff'].cpu().item()),
+                        "epistemic_uncertainty": epistemic_unc,
+                        "aleatoric_uncertainty": aleatoric_unc,
+                        "attention_entropy": float(phase2_out['analysis']['attention_entropy'])
+                    },
+                    phase3_classification={
+                        "main_classifier_confidence": float(torch.max(torch.softmax(phase3_out['main_logits'], dim=1)).item()),
+                        "cliff_classifier_confidence": float(torch.max(torch.softmax(phase3_out['cliff_logits'], dim=1)).item()),
+                        "classifier_used": "cliff" if is_cliff_case else "main",
+                        "monte_carlo_uncertainty": uncertainty
+                    }
+                )
+            except Exception as phase_error:
+                logger.warning(f"⚠️ Error generando phase_analysis: {phase_error}")
+                phase_analysis = None
         
         # Tiempo de procesamiento
         processing_time = time.time() - start_time
