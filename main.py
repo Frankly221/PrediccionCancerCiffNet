@@ -14,7 +14,7 @@ from contextlib import asynccontextmanager
 
 # Importar tus módulos
 from phase1_feature_extraction import create_phase1_extractor
-from phase2_cliff_Detection_complete import create_phase2_complete_detector
+from phase2_cliff_detection_complete import create_phase2_complete_detector
 from phase3_classification_complete import create_phase3_complete_classifier
 
 # Configurar logging
@@ -140,7 +140,7 @@ async def lifespan(app: FastAPI):
         model_instance = CiffNetADCComplete(num_classes=7, cliff_threshold=0.15)
         
         # Cargar weights entrenados
-        model_path = "models/ciffnet_adc_trained.pth"  # Tu modelo .pth
+        model_path = "results/models/ciffnet_epoch_100.pth"  # Tu modelo .pth
         
         if torch.cuda.is_available():
             checkpoint = torch.load(model_path)
