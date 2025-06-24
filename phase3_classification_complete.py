@@ -68,20 +68,34 @@ class CliffAwareClassifier(nn.Module):
         # Clasificación especializada para cliff
         cliff_logits = self.cliff_classifier(enhanced_features)
         
+        # ✅ DEBUGGING: Verificar que los logits tengan sentido
+        logger.info(f"🔍 Main logits shape: {main_logits.shape}")
+        logger.info(f"🔍 Main logits values: {main_logits}")
+        logger.info(f"🔍 Cliff logits shape: {cliff_logits.shape}")
+        logger.info(f"🔍 Cliff logits values: {cliff_logits}")
+        
         # Uncertainty estimation
         uncertainty_scores = self.uncertainty_layers(enhanced_features).squeeze(-1)
         
-        # ✅ CORREGIDO: cliff_mask ahora será [batch_size]
+        # cliff_mask ahora será [batch_size]
         cliff_mask = cliff_scores > self.cliff_threshold
         
         # Combinar logits basado en cliff detection
         final_logits = main_logits.clone()
         if cliff_mask.any():
-            # ✅ CORREGIDO: Indexación correcta
             final_logits[cliff_mask] = cliff_logits[cliff_mask]
+        
+        # ✅ DEBUGGING: Verificar final_logits
+        logger.info(f"🔍 Final logits shape: {final_logits.shape}")
+        logger.info(f"🔍 Final logits values: {final_logits}")
         
         # Aplicar softmax para probabilidades
         probabilities = F.softmax(final_logits, dim=1)
+        
+        # ✅ DEBUGGING: Verificar probabilidades
+        logger.info(f"🔍 Probabilities shape: {probabilities.shape}")
+        logger.info(f"🔍 Probabilities values: {probabilities}")
+        logger.info(f"🔍 Probabilities sum: {probabilities.sum(dim=1)}")
         
         # Monte Carlo Dropout para uncertainty (solo en training)
         if training and self.training:
@@ -104,8 +118,14 @@ class CliffAwareClassifier(nn.Module):
         # Confidence como max probability
         confidence_scores = torch.max(probabilities, dim=1)[0]
         
-        # Predictions finales
+        # ✅ CORREGIDO: Predictions finales CORRECTAS
         predictions = torch.argmax(final_logits, dim=1)
+        
+        # ✅ DEBUGGING: Verificar predictions
+        logger.info(f"🔍 Predictions shape: {predictions.shape}")
+        logger.info(f"🔍 Predictions values: {predictions}")
+        logger.info(f"🔍 Confidence shape: {confidence_scores.shape}")
+        logger.info(f"🔍 Confidence values: {confidence_scores}")
         
         return {
             'logits': final_logits,
