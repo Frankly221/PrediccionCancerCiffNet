@@ -59,11 +59,24 @@ class CiffNetADCComplete(nn.Module):
     def forward(self, x):
         """Forward pass completo a través de las 3 fases"""
         
+        # ✅ ASEGURAR TIPO CONSISTENTE ANTES DE PHASE1
+        x = x.float()  # Forzar float32 antes de cualquier procesamiento
+        
         # FASE 1: Feature Extraction
         phase1_outputs = self.phase1(x)
         
+        # ✅ ASEGURAR TIPO CONSISTENTE DESPUÉS DE PHASE1
+        for key, value in phase1_outputs.items():
+            if isinstance(value, torch.Tensor):
+                phase1_outputs[key] = value.float()
+        
         # FASE 2: Cliff Detection & Enhancement
         phase2_outputs = self.phase2(phase1_outputs['fused_features'])
+        
+        # ✅ ASEGURAR TIPO CONSISTENTE DESPUÉS DE PHASE2
+        for key, value in phase2_outputs.items():
+            if isinstance(value, torch.Tensor):
+                phase2_outputs[key] = value.float()
         
         # FASE 3: Cliff-Aware Classification
         phase3_outputs = self.phase3(phase2_outputs, return_all=True)
