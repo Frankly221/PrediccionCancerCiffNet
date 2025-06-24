@@ -12,7 +12,31 @@ import logging
 import traceback
 from contextlib import asynccontextmanager
 
-# Importar tus módulos
+# ✅ MONKEY PATCH PARA DESHABILITAR AUTOCAST COMPLETAMENTE
+import torch.cuda.amp as amp
+
+class DisabledAutocast:
+    """Clase que reemplaza autocast para deshabilitarlo completamente"""
+    def __init__(self, *args, **kwargs):
+        self.enabled = False
+    
+    def __enter__(self):
+        return self
+    
+    def __exit__(self, *args):
+        pass
+
+# ✅ REEMPLAZAR AUTOCAST GLOBALMENTE
+original_autocast = amp.autocast
+amp.autocast = DisabledAutocast
+torch.cuda.amp.autocast = DisabledAutocast
+
+# ✅ TAMBIÉN REEMPLAZAR EN MÓDULOS IMPORTADOS
+import sys
+if 'torch.cuda.amp' in sys.modules:
+    sys.modules['torch.cuda.amp'].autocast = DisabledAutocast
+
+# Importar tus módulos DESPUÉS del monkey patch
 from phase1_feature_extraction import create_phase1_extractor
 from phase2_cliff_detection_complete import create_phase2_complete_detector
 from phase3_classification_complete import create_phase3_complete_classifier
@@ -56,45 +80,41 @@ class CiffNetADCComplete(nn.Module):
             'Vascular Lesion': 'LOW'
         }
     
-    def _force_float32_recursive(self, obj):
-        """
-        Fuerza recursivamente todos los tensors a float32
-        """
-        if isinstance(obj, torch.Tensor):
-            return obj.float()
-        elif isinstance(obj, dict):
-            return {k: self._force_float32_recursive(v) for k, v in obj.items()}
-        elif isinstance(obj, (list, tuple)):
-            return type(obj)(self._force_float32_recursive(item) for item in obj)
-        else:
-            return obj
-    
     def forward(self, x):
         """Forward pass completo a través de las 3 fases"""
         
-        # ✅ FORZAR FLOAT32 DESDE EL INICIO
+        # ✅ FORZAR FLOAT32 AGRESIVAMENTE
         x = x.float()
         
-        # ✅ DESHABILITAR AUTOCAST COMPLETAMENTE DURANTE ESTE FORWARD
-        with torch.cuda.amp.autocast(enabled=False):
-            
-            # FASE 1: Feature Extraction
-            phase1_outputs = self.phase1(x)
-            
-            # ✅ FORZAR FLOAT32 EN TODOS LOS OUTPUTS DE PHASE1
-            phase1_outputs = self._force_float32_recursive(phase1_outputs)
-            
-            # FASE 2: Cliff Detection & Enhancement  
-            phase2_outputs = self.phase2(phase1_outputs['fused_features'])
-            
-            # ✅ FORZAR FLOAT32 EN TODOS LOS OUTPUTS DE PHASE2
-            phase2_outputs = self._force_float32_recursive(phase2_outputs)
-            
-            # FASE 3: Cliff-Aware Classification
-            phase3_outputs = self.phase3(phase2_outputs, return_all=True)
-            
-            # ✅ FORZAR FLOAT32 EN TODOS LOS OUTPUTS DE PHASE3
-            phase3_outputs = self._force_float32_recursive(phase3_outputs)
+        # ✅ FUNCIÓN PARA FORZAR FLOAT32 EN CUALQUIER TENSOR
+        def force_float32_tensor(tensor):
+            if tensor is not None and isinstance(tensor, torch.Tensor):
+                return tensor.float()
+            return tensor
+        
+        # ✅ FUNCIÓN PARA FORZAR FLOAT32 EN ESTRUCTURAS COMPLEJAS
+        def force_float32_recursive(obj):
+            if isinstance(obj, torch.Tensor):
+                return obj.float()
+            elif isinstance(obj, dict):
+                return {k: force_float32_recursive(v) for k, v in obj.items()}
+            elif isinstance(obj, (list, tuple)):
+                return type(obj)(force_float32_recursive(item) for item in obj)
+            else:
+                return obj
+        
+        # FASE 1: Feature Extraction
+        phase1_outputs = self.phase1(x)
+        phase1_outputs = force_float32_recursive(phase1_outputs)
+        
+        # FASE 2: Cliff Detection & Enhancement
+        phase2_input = force_float32_tensor(phase1_outputs['fused_features'])
+        phase2_outputs = self.phase2(phase2_input)
+        phase2_outputs = force_float32_recursive(phase2_outputs)
+        
+        # FASE 3: Cliff-Aware Classification
+        phase3_outputs = self.phase3(phase2_outputs, return_all=True)
+        phase3_outputs = force_float32_recursive(phase3_outputs)
         
         return {
             'phase1': phase1_outputs,
@@ -158,11 +178,16 @@ async def lifespan(app: FastAPI):
     
     # Startup: Cargar modelo
     logger.info("🚀 Iniciando CiffNet-ADC Backend...")
+    logger.info("⚠️ AUTOCAST DESHABILITADO GLOBALMENTE")
     
     try:
         # Detectar device
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         logger.info(f"📱 Device detectado: {device}")
+        
+        # ✅ DESHABILITAR AUTOCAST Y TF32 GLOBALMENTE
+        torch.backends.cudnn.allow_tf32 = False
+        torch.backends.cuda.matmul.allow_tf32 = False
         
         # Crear modelo
         model_instance = CiffNetADCComplete(num_classes=7, cliff_threshold=0.15)
@@ -189,35 +214,54 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning(f"⚠️ Error cargando modelo: {e}. Usando modelo inicializado.")
         
-        # ✅ FORZAR TODO EL MODELO A FLOAT32
-        model_instance = model_instance.to(device).float()
+        # ✅ FORZAR TODO EL MODELO A FLOAT32 DE FORMA AGRESIVA
+        model_instance = model_instance.to(device)
         
-        # ✅ FORZAR RECURSIVAMENTE TODOS LOS SUBMÓDULOS A FLOAT32
-        def force_float32_modules(module):
+        # ✅ FUNCIÓN RECURSIVA MEJORADA PARA FORZAR FLOAT32
+        def force_all_float32(module):
+            """Fuerza recursivamente TODOS los elementos a float32"""
+            # Procesar hijos primero
             for child in module.children():
-                force_float32_modules(child)
-            # Forzar parámetros a float32
+                force_all_float32(child)
+            
+            # Forzar parámetros
             for param in module.parameters(recurse=False):
-                param.data = param.data.float()
-            # Forzar buffers a float32
+                if param is not None:
+                    param.data = param.data.float()
+                    if param.grad is not None:
+                        param.grad = param.grad.float()
+            
+            # Forzar buffers
             for buffer in module.buffers(recurse=False):
-                buffer.data = buffer.data.float()
+                if buffer is not None:
+                    buffer.data = buffer.data.float()
+            
+            # Forzar el módulo completo si es posible
+            try:
+                module.float()
+            except:
+                pass
         
-        force_float32_modules(model_instance)
+        # Aplicar conversión agresiva
+        force_all_float32(model_instance)
+        model_instance.float()  # Forzar a nivel superior
         model_instance.eval()
-        
-        # ✅ DESHABILITAR AUTOCAST GLOBALMENTE
-        torch.backends.cudnn.allow_tf32 = False
-        torch.backends.cuda.matmul.allow_tf32 = False
         
         logger.info("✅ Modelo CiffNet-ADC inicializado exitosamente")
         logger.info(f"📊 Device: {device}")
         logger.info(f"📊 Tipo de parámetros: {next(model_instance.parameters()).dtype}")
         logger.info(f"📊 Parámetros totales: {sum(p.numel() for p in model_instance.parameters()):,}")
         
-        # ✅ VERIFICAR QUE TODOS LOS PARÁMETROS SEAN FLOAT32
+        # ✅ VERIFICACIÓN EXHAUSTIVA
         all_float32 = all(p.dtype == torch.float32 for p in model_instance.parameters())
         logger.info(f"📊 Todos los parámetros en float32: {all_float32}")
+        
+        # ✅ VERIFICAR BUFFERS TAMBIÉN
+        all_buffers_float32 = all(b.dtype == torch.float32 for b in model_instance.buffers())
+        logger.info(f"📊 Todos los buffers en float32: {all_buffers_float32}")
+        
+        if not all_float32 or not all_buffers_float32:
+            logger.warning("⚠️ Algunos parámetros/buffers no están en float32")
         
         yield
         
@@ -273,7 +317,7 @@ def preprocess_image(image: Image.Image) -> torch.Tensor:
     
     img_array = (img_array - mean) / std
     
-    # Convert to tensor [C, H, W] - ✅ CAMBIAR ESTA LÍNEA
+    # Convert to tensor [C, H, W] - ✅ FORZAR FLOAT32
     img_tensor = torch.from_numpy(img_array.transpose(2, 0, 1)).float()
     
     # Add batch dimension [1, C, H, W]
@@ -337,7 +381,8 @@ async def root():
         "message": "CiffNet-ADC Dermatological Diagnosis API",
         "version": "1.0.0",
         "status": "operational",
-        "model_loaded": model_instance is not None
+        "model_loaded": model_instance is not None,
+        "autocast_disabled": True
     }
 
 @app.get("/health")
@@ -350,7 +395,9 @@ async def health_check():
         "model_loaded": model_instance is not None,
         "device": str(device),
         "cuda_available": torch.cuda.is_available(),
-        "gpu_name": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None
+        "gpu_name": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
+        "autocast_disabled": True,
+        "tf32_disabled": not torch.backends.cudnn.allow_tf32
     }
 
 @app.post("/diagnose", response_model=ComprehensiveResponse)
@@ -380,16 +427,21 @@ async def diagnose_lesion(
         # Preprocessar
         input_tensor = preprocess_image(image)
         
-        # ✅ ASEGURAR COMPATIBILIDAD DE TIPOS (CAMBIAR ESTAS LÍNEAS)
+        # ✅ FORZAR FLOAT32 AGRESIVAMENTE
         input_tensor = input_tensor.float().to(device)
         
-        # ✅ LOGGING DE VERIFICACIÓN (OPCIONAL)
+        # ✅ LOGGING DE VERIFICACIÓN
         logger.info(f"🔍 Input tensor type: {input_tensor.dtype}")
         logger.info(f"🔍 Input shape: {input_tensor.shape}")
         logger.info(f"🔍 Model weight type: {next(model_instance.parameters()).dtype}")
+        logger.info(f"🔍 Autocast status: DISABLED")
         
-        # Inferencia
+        # ✅ INFERENCIA CON PROTECCIONES MÁXIMAS
         with torch.no_grad():
+            # Asegurar eval mode
+            model_instance.eval()
+            
+            # Forward pass
             outputs = model_instance(input_tensor)
         
         # Extraer resultados
@@ -528,6 +580,8 @@ async def get_model_info():
         "num_classes": model_instance.num_classes,
         "cliff_threshold": model_instance.cliff_threshold,
         "input_size": "224x224x3",
+        "autocast_status": "GLOBALLY_DISABLED",
+        "precision": "float32_forced",
         "phases": {
             "phase1": "Feature Extraction (EfficientNet-B1)",
             "phase2": "Cliff Detection & Enhancement (CFM+CRI+CAFE)",
